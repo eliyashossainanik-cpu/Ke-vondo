@@ -1,5 +1,5 @@
 import { PLAYER_COLORS, type RoomSettings, type RoomSnapshot } from '../shared/types';
-import { Bot, Play, LogOut, Copy, Check } from 'lucide-react';
+import { Bot, Play, LogOut, Copy, Check, Link2 } from 'lucide-react';
 import { useState } from 'react';
 
 export interface LobbyOverlayProps {
@@ -24,6 +24,7 @@ export function LobbyOverlay({
   onLeaveRoom,
 }: LobbyOverlayProps) {
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const localPlayer = snapshot.players.find((p) => p.id === localPlayerId);
   const isHost = Boolean(localPlayer?.isHost);
 
@@ -33,13 +34,20 @@ export function LobbyOverlay({
     setTimeout(() => setCopied(false), 1800);
   };
 
+  const handleCopyInviteLink = () => {
+    const inviteUrl = `${window.location.origin}/?room=${encodeURIComponent(snapshot.roomCode)}`;
+    navigator.clipboard?.writeText(inviteUrl).catch(() => {});
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2200);
+  };
+
   return (
-    <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-5 sm:p-8">
-      {/* Top Bar: Room Code + Roster Summary */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
+    <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-4 sm:p-8">
+      {/* Top Bar: Room Code + Invite Link + Leave */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div
-          className="pointer-events-auto rounded-2xl px-5 py-3.5 border border-white/12 flex items-center gap-4"
-          style={{ backgroundColor: 'rgba(15, 23, 42, 0.9)' }}
+          className="pointer-events-auto rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5 border border-white/12 flex flex-wrap items-center gap-3 sm:gap-4"
+          style={{ backgroundColor: 'rgba(15, 23, 42, 0.92)' }}
         >
           <div>
             <span className="block text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
@@ -49,15 +57,29 @@ export function LobbyOverlay({
               {snapshot.roomCode}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={handleCopyCode}
-            aria-label="Copy room code"
-            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5"
-          >
-            {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-            {copied ? 'Copied' : 'Copy'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCopyCode}
+              aria-label="Copy room code"
+              className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-xs font-bold text-slate-950 flex items-center gap-1.5"
+            >
+              {copied ? <Check className="w-4 h-4 text-emerald-700" /> : <Copy className="w-4 h-4" />}
+              {copied ? 'Code Copied!' : 'Copy Code'}
+            </button>
+            <button
+              type="button"
+              onClick={handleCopyInviteLink}
+              aria-label="Copy invite link"
+              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5"
+            >
+              {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Link2 className="w-4 h-4" />}
+              {copiedLink ? 'Link Copied' : 'Invite Link'}
+            </button>
+          </div>
+          <p className="w-full text-[11px] text-slate-300 border-t border-slate-800 pt-1.5">
+            Bondhuder <strong className="text-amber-300">{snapshot.roomCode}</strong> code-ta dao — tara <strong>Online Multiplayer → ROOM CODE</strong> likhe Join korlei eksathe dhukte parbe!
+          </p>
         </div>
 
         <button

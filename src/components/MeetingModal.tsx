@@ -128,6 +128,11 @@ export function MeetingModal({
                             {p.id === localPlayerId && (
                               <span className="text-[11px] text-amber-300">(You)</span>
                             )}
+                            {p.id === localPlayerId && p.specialRole === 'neta' && p.alive && (
+                              <span className="px-1.5 py-0.5 rounded bg-yellow-400/20 text-yellow-300 text-[10px] font-bold">
+                                2x Vote
+                              </span>
+                            )}
                           </div>
                           <span className="text-xs text-slate-400">
                             {!p.alive ? 'Eliminated' : p.hasVoted ? 'Voted' : 'Thinking...'}
@@ -159,18 +164,19 @@ export function MeetingModal({
 
                     {isVoteResults && votersForP.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/80">
-                        {votersForP.map((voter) => {
+                        {votersForP.flatMap((voter) => {
                           const vc = PLAYER_COLORS.find((col) => col.id === voter.color) ?? PLAYER_COLORS[0];
-                          return (
+                          const weight = voter.specialRole === 'neta' ? 2 : 1;
+                          return Array.from({ length: weight }, (_, pipIdx) => (
                             <span
-                              key={voter.id}
+                              key={`${voter.id}_${pipIdx}`}
                               title={snapshot.settings.anonymousVotes ? 'Anonymous Vote' : voter.name}
                               className="w-4 h-4 rounded-full border border-white/30 inline-block"
                               style={{
                                 backgroundColor: snapshot.settings.anonymousVotes ? '#94a3b8' : vc.hex,
                               }}
                             />
-                          );
+                          ));
                         })}
                       </div>
                     )}

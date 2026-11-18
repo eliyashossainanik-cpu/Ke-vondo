@@ -5,7 +5,18 @@ export interface GuideModalProps {
   onClose: () => void;
 }
 
-const ROLE_ORDER: SpecialRole[] = ['none', 'goyenda', 'kobiraj', 'mistri', 'bohurupi', 'pagol'];
+const ROLE_ORDER: SpecialRole[] = [
+  'none',
+  'goyenda',
+  'kobiraj',
+  'mistri',
+  'daroga',
+  'neta',
+  'daktar',
+  'bohurupi',
+  'jharudar',
+  'pagol',
+];
 
 export function GuideModal({ onClose }: GuideModalProps) {
   return (

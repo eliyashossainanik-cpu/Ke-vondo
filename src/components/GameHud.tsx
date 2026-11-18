@@ -24,15 +24,18 @@ import {
   VENT_RANGE,
   canCompleteTasks,
   canUseVent,
+  findNearestCleanableBody,
+  findNearestDarogaTarget,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
+  findNearestRevivableBody,
   findNearestShieldTarget,
   getConnectedVents,
   getDirectionCompass,
 } from '../shared/gameRules';
 import type { StationModalKind } from './StationModals';
-import { getQuickMemeList, type MemeSoundId } from '../audio/soundEngine';
+import { getQuickMemeList, soundEngine, type MemeSoundId } from '../audio/soundEngine';
 import { subscribeMemePack } from '../audio/memePackStore';
 import {
   Volume2,
@@ -55,6 +58,7 @@ import {
   Shield,
   Search,
   Smile,
+  Music,
   Music2,
   HelpCircle,
   Navigation,
@@ -64,6 +68,9 @@ import {
   ChevronUp,
   Smartphone,
   X,
+  Gavel,
+  HeartPulse,
+  Sparkle,
 } from 'lucide-react';
 import {
   enterMobileFullscreenAndLandscape,
@@ -163,10 +170,15 @@ export function GameHud({
   const [showSabotageMenu, setShowSabotageMenu] = useState(false);
   const [showDisguiseMenu, setShowDisguiseMenu] = useState(false);
   const [showMemeDrawer, setShowMemeDrawer] = useState(false);
+  const [bgmEnabled, setBgmEnabled] = useState(() => soundEngine.isBgmEnabled());
   const [, setPackVer] = useState(0);
 
   useEffect(() => subscribeMemePack(() => setPackVer((v) => v + 1)), []);
   useEffect(() => subscribeFullscreenChange(setIsFullscreen), []);
+  useEffect(
+    () => soundEngine.subscribeBgmState(() => setBgmEnabled(soundEngine.isBgmEnabled())),
+    [],
+  );
   useEffect(() => {
     const updateVp = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener('resize', updateVp);
@@ -227,6 +239,9 @@ export function GameHud({
   const nearbyBody = findNearestReportableBody(localPlayer, snapshot.bodies);
   const inspectableBody = findNearestInspectableBody(localPlayer, snapshot.bodies);
   const shieldTarget = findNearestShieldTarget(localPlayer, snapshot.players);
+  const darogaTarget = findNearestDarogaTarget(localPlayer, snapshot.players);
+  const cleanableBody = findNearestCleanableBody(localPlayer, snapshot.bodies);
+  const revivableBody = findNearestRevivableBody(localPlayer, snapshot.bodies);
 
   const nearBell =
     localPlayer.alive &&
@@ -319,50 +334,39 @@ export function GameHud({
         />
       )}
 
-      {/* Non-blocking Portrait Mobile Fullscreen Landscape Quick Chip */}
-      {touchControlsEnabled &&
-        !isFullscreen &&
-        viewport.w < viewport.h &&
-        !dismissRotatePrompt &&
-        !clueNotice && (
-          <div className="fixed top-2 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 border border-amber-400/45 shadow-lg bg-slate-950/90 text-[11px] font-bold text-amber-200 whitespace-nowrap">
-            <button
-              type="button"
-              onClick={() => {
-                void enterMobileFullscreenAndLandscape();
-              }}
-              className="flex items-center gap-1.5 text-amber-200 hover:text-white"
-            >
-              <Smartphone className="w-3.5 h-3.5 text-amber-300" />
-              <span>Fullscreen Landscape</span>
-              <Maximize2 className="w-3 h-3 text-amber-300" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setDismissRotatePrompt(true)}
-              aria-label="Dismiss fullscreen tip"
-              className="p-0.5 text-slate-400 hover:text-white"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        )}
+      {/* Top Container: Portrait Fullscreen Banner (when in portrait) + Left/Right HUD Clusters */}
+      <div className="flex flex-col gap-1.5">
+        {/* Non-blocking Portrait Mobile Fullscreen Landscape Quick Chip */}
+        {touchControlsEnabled &&
+          !isFullscreen &&
+          viewport.w < viewport.h &&
+          !dismissRotatePrompt &&
+          !clueNotice && (
+            <div className="self-center pointer-events-auto flex items-center gap-1.5 rounded-xl px-2.5 py-1 border border-amber-400/45 shadow-lg bg-slate-950/92 text-[11px] font-bold text-amber-200 whitespace-nowrap shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  void enterMobileFullscreenAndLandscape();
+                }}
+                className="flex items-center gap-1.5 text-amber-200 hover:text-white"
+              >
+                <Smartphone className="w-3.5 h-3.5 text-amber-300" />
+                <span>Fullscreen Landscape</span>
+                <Maximize2 className="w-3 h-3 text-amber-300" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setDismissRotatePrompt(true)}
+                aria-label="Dismiss fullscreen tip"
+                className="p-0.5 text-slate-400 hover:text-white"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
 
-      {/* Top-Center Clue / Ability Toast */}
-      {clueNotice && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed top-4 left-1/2 -translate-x-1/2 z-30 max-w-md w-[90vw] rounded-xl px-4 py-2.5 border border-cyan-400/50 shadow-2xl text-center"
-          style={{ backgroundColor: 'rgba(10, 18, 32, 0.94)' }}
-        >
-          <div className="text-xs font-display font-bold text-cyan-300">{clueNotice.title}</div>
-          <div className="text-[11px] sm:text-xs text-slate-100 mt-0.5">{clueNotice.detail}</div>
-        </div>
-      )}
-
-      {/* Top Row: Left Task/Role Cluster & Right Utility/Minimap Cluster */}
-      <div className="flex items-start justify-between gap-2 sm:gap-4">
+        {/* Top Row: Left Task/Role Cluster & Right Utility/Minimap Cluster */}
+        <div className="flex items-start justify-between gap-2 sm:gap-4">
         {/* Top-Left Cluster */}
         <div
           className={`flex flex-col gap-1.5 w-full ${
@@ -405,6 +409,7 @@ export function GameHud({
                   : isVondo
                     ? 'BATPAR'
                     : 'PARA-BASI'}
+                {localPlayer.specialRole === 'neta' && localPlayer.alive ? ' · 2x Vote' : ''}
                 {!localPlayer.alive ? ' · Ghost' : ''}
               </span>
               <span className="text-slate-200 font-semibold truncate max-w-[130px] sm:max-w-[155px]" title={currentZone}>
@@ -731,10 +736,32 @@ export function GameHud({
               tabIndex={-1}
               onClick={(e) => {
                 e.currentTarget.blur();
+                soundEngine.toggleBgm();
+              }}
+              aria-label={bgmEnabled ? 'Turn Off Background Music' : 'Turn On Background Music'}
+              title={bgmEnabled ? 'BGM On (Click to Mute Music)' : 'BGM Off (Click to Play Music)'}
+              className={`${
+                isLandscapeCompact
+                  ? 'min-w-[34px] min-h-[34px]'
+                  : 'min-w-[36px] min-h-[36px] sm:min-w-[44px] sm:min-h-[44px]'
+              } rounded-xl border flex items-center justify-center ${
+                bgmEnabled
+                  ? 'border-emerald-400/50 text-emerald-300 hover:text-emerald-200'
+                  : 'border-white/12 text-slate-400 hover:text-white'
+              }`}
+              style={{ backgroundColor: 'rgba(12, 18, 30, 0.88)' }}
+            >
+              <Music className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={(e) => {
+                e.currentTarget.blur();
                 onToggleMute();
               }}
               aria-label={muted ? 'Unmute Audio [M]' : 'Mute Audio [M]'}
-              title="Mute [M]"
+              title="Mute All [M]"
               className={`${
                 isLandscapeCompact
                   ? 'min-w-[34px] min-h-[34px]'
@@ -923,7 +950,21 @@ export function GameHud({
             </button>
           )}
         </div>
+        </div>
       </div>
+
+      {/* Top-Center Clue / Ability Toast */}
+      {clueNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-4 left-1/2 -translate-x-1/2 z-30 max-w-md w-[90vw] rounded-xl px-4 py-2.5 border border-cyan-400/50 shadow-2xl text-center"
+          style={{ backgroundColor: 'rgba(10, 18, 32, 0.94)' }}
+        >
+          <div className="text-xs font-display font-bold text-cyan-300">{clueNotice.title}</div>
+          <div className="text-[11px] sm:text-xs text-slate-100 mt-0.5">{clueNotice.detail}</div>
+        </div>
+      )}
 
       {/* Bottom Row: Vent/Sabotage/Disguise Drawers + Thumb-Friendly Action Buttons */}
       <div className="flex items-end justify-between gap-2 sm:gap-4">
@@ -938,7 +979,11 @@ export function GameHud({
 
         <div
           className={`pointer-events-auto flex flex-col items-end gap-2 ml-auto ${
-            isLandscapeCompact ? 'mr-14' : 'max-w-[54vw] sm:max-w-none'
+            isLandscapeCompact
+              ? 'mr-14'
+              : touchControlsEnabled
+                ? 'mr-16 max-w-[46vw] sm:max-w-none'
+                : 'max-w-[54vw] sm:max-w-none'
           }`}
         >
           {localPlayer.inVent && (
@@ -1156,6 +1201,54 @@ export function GameHud({
                   : shieldTarget
                     ? `Shield ${shieldTarget.name} [G]`
                     : 'Self Tabiz [G]'}
+              </button>
+            )}
+
+            {localPlayer.alive && localPlayer.specialRole === 'daroga' && (
+              <button
+                type="button"
+                disabled={!darogaTarget || localPlayer.abilityCooldown > 0.05}
+                onClick={() => darogaTarget && onUseAbility(darogaTarget.id)}
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+              >
+                <Gavel className="w-4 h-4" />
+                {localPlayer.abilityCooldown > 0.05
+                  ? `Daroga (${Math.ceil(localPlayer.abilityCooldown)}s)`
+                  : darogaTarget
+                    ? `Arrest ${darogaTarget.name} [G]`
+                    : 'Arrest Shot [G]'}
+              </button>
+            )}
+
+            {localPlayer.alive && localPlayer.specialRole === 'daktar' && (
+              <button
+                type="button"
+                disabled={!revivableBody || (localPlayer.revivesLeft ?? 0) <= 0}
+                onClick={() => revivableBody && onUseAbility(revivableBody.id)}
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-teal-400 hover:bg-teal-300 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+              >
+                <HeartPulse className="w-4 h-4" />
+                {(localPlayer.revivesLeft ?? 0) <= 0
+                  ? 'Saline Used'
+                  : revivableBody
+                    ? `Revive ${revivableBody.victimName} [G]`
+                    : `Saline Revive (${localPlayer.revivesLeft ?? 0}) [G]`}
+              </button>
+            )}
+
+            {localPlayer.alive && localPlayer.specialRole === 'jharudar' && (
+              <button
+                type="button"
+                disabled={!cleanableBody || localPlayer.abilityCooldown > 0.05}
+                onClick={() => cleanableBody && onUseAbility(cleanableBody.id)}
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+              >
+                <Sparkle className="w-4 h-4" />
+                {localPlayer.abilityCooldown > 0.05
+                  ? `Clean (${Math.ceil(localPlayer.abilityCooldown)}s)`
+                  : cleanableBody
+                    ? `Clean ${cleanableBody.victimName} [G]`
+                    : 'Clean Lash [G]'}
               </button>
             )}
 

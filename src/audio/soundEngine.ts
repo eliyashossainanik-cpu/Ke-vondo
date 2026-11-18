@@ -9,6 +9,11 @@ import {
 
 export type MemeSoundId = QuickMemeId;
 
+export const BGM_TRACK_URL = '/assets/aistudio/frad_-_ditto_682be4e7.mp3';
+const BGM_STORAGE_KEY = 'ke_batpar_bgm_enabled';
+const BGM_NORMAL_VOLUME = 0.24;
+const BGM_DUCKED_VOLUME = 0.11;
+
 export function getQuickMemeList(): Array<{ id: MemeSoundId; label: string; shortKey: string }> {
   return MEME_SLOTS.filter((s) => s.category === 'quick').map((s) => ({
     id: s.id as MemeSoundId,
@@ -30,11 +35,135 @@ class SoundEngine {
   private noiseBuffer: AudioBuffer | null = null;
   private decodedCache = new Map<MemeSlotId, { refBuf: ArrayBuffer; audio: AudioBuffer }>();
   private activeSources = new Map<MemeSlotId, AudioBufferSourceNode>();
+  private bgmAudio: HTMLAudioElement | null = null;
+  private bgmEnabled = true;
+  private bgmDucked = false;
+  private bgmListeners = new Set<() => void>();
 
   constructor() {
     if (typeof window !== 'undefined') {
       initMemePackStore().catch(() => {});
+      try {
+        const saved = window.localStorage.getItem(BGM_STORAGE_KEY);
+        if (saved === 'false') {
+          this.bgmEnabled = false;
+        }
+      } catch {
+        // ignore storage access issues
+      }
+      const unlockBgm = () => {
+        if (this.bgmEnabled && !this.muted) {
+          this.startBgm();
+        }
+      };
+      window.addEventListener('pointerdown', unlockBgm, { passive: true });
+      window.addEventListener('keydown', unlockBgm, { passive: true });
     }
+  }
+
+  private getTargetBgmVolume(): number {
+    return this.bgmDucked ? BGM_DUCKED_VOLUME : BGM_NORMAL_VOLUME;
+  }
+
+  private ensureBgmElement(): HTMLAudioElement | null {
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return null;
+    if (!this.bgmAudio) {
+      const audio = new Audio(BGM_TRACK_URL);
+      audio.loop = true;
+      audio.preload = 'auto';
+      audio.volume = this.getTargetBgmVolume();
+      audio.muted = this.muted || !this.bgmEnabled;
+      this.bgmAudio = audio;
+    }
+    return this.bgmAudio;
+  }
+
+  private notifyBgmListeners(): void {
+    for (const cb of this.bgmListeners) {
+      try {
+        cb();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private syncBgmState(): void {
+    const audio = this.bgmAudio;
+    if (!audio) return;
+    audio.volume = this.getTargetBgmVolume();
+    const shouldMute = this.muted || !this.bgmEnabled;
+    audio.muted = shouldMute;
+    if (shouldMute) {
+      if (!audio.paused) {
+        audio.pause();
+      }
+    } else if (audio.paused) {
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          // Will start automatically on next pointer/key interaction
+        });
+      }
+    }
+  }
+
+  public startBgm(): void {
+    if (this.muted || !this.bgmEnabled) return;
+    const audio = this.ensureBgmElement();
+    if (!audio) return;
+    audio.volume = this.getTargetBgmVolume();
+    audio.muted = false;
+    if (audio.paused) {
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          // Blocked until user gesture; handled gracefully
+        });
+      }
+    }
+  }
+
+  public isBgmEnabled(): boolean {
+    return this.bgmEnabled;
+  }
+
+  public setBgmEnabled(enabled: boolean): void {
+    this.bgmEnabled = enabled;
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(BGM_STORAGE_KEY, enabled ? 'true' : 'false');
+      } catch {
+        // ignore
+      }
+    }
+    if (enabled && !this.muted) {
+      this.startBgm();
+    } else {
+      this.syncBgmState();
+    }
+    this.notifyBgmListeners();
+  }
+
+  public toggleBgm(): boolean {
+    const next = !this.bgmEnabled;
+    this.setBgmEnabled(next);
+    return next;
+  }
+
+  public setBgmDucked(ducked: boolean): void {
+    if (this.bgmDucked === ducked) return;
+    this.bgmDucked = ducked;
+    if (this.bgmAudio) {
+      this.bgmAudio.volume = this.getTargetBgmVolume();
+    }
+  }
+
+  public subscribeBgmState(cb: () => void): () => void {
+    this.bgmListeners.add(cb);
+    return () => {
+      this.bgmListeners.delete(cb);
+    };
   }
 
   private ensureContext(): AudioContext | null {
@@ -151,11 +280,23 @@ class SoundEngine {
         case 'event_shield':
           this.playShieldSynth();
           break;
+        case 'event_daroga':
+          this.playDarogaSynth();
+          break;
+        case 'event_clean':
+          this.playCleanSynth();
+          break;
+        case 'event_revive':
+          this.playReviveSynth();
+          break;
         case 'event_task':
           this.playTaskSynth();
           break;
         case 'event_vent':
           this.playVentSynth();
+          break;
+        case 'event_jump':
+          this.playJumpSynth();
           break;
         case 'event_win':
           this.playAirhorn();
@@ -183,6 +324,7 @@ class SoundEngine {
 
   public setMuted(muted: boolean): void {
     this.muted = muted;
+    this.syncBgmState();
   }
 
   public isMuted(): boolean {
@@ -596,7 +738,7 @@ class SoundEngine {
     });
   }
 
-  public playJump(): void {
+  private playJumpSynth(): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const t = ctx.currentTime;
@@ -610,6 +752,73 @@ class SoundEngine {
     osc.connect(gain).connect(ctx.destination);
     osc.start(t);
     osc.stop(t + 0.15);
+  }
+
+  public playJump(): void {
+    this.tryPlayCustomSlot('event_jump', () => this.playJumpSynth());
+  }
+
+  private playDarogaSynth(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(520, t);
+    osc.frequency.exponentialRampToValueAtTime(95, t + 0.18);
+    gain.gain.setValueAtTime(0.22, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.21);
+  }
+
+  public playDarogaShot(): void {
+    this.tryPlayCustomSlot('event_daroga', () => this.playDarogaSynth());
+  }
+
+  private playCleanSynth(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1600, t);
+    filter.frequency.exponentialRampToValueAtTime(520, t + 0.28);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.2, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    src.connect(filter).connect(gain).connect(ctx.destination);
+    src.start(t);
+    src.stop(t + 0.32);
+  }
+
+  public playCleanBody(): void {
+    this.tryPlayCustomSlot('event_clean', () => this.playCleanSynth());
+  }
+
+  private playReviveSynth(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    [440, 554.37, 659.25, 880].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t + idx * 0.055);
+      gain.gain.setValueAtTime(0.14, t + idx * 0.055);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.055 + 0.25);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t + idx * 0.055);
+      osc.stop(t + idx * 0.055 + 0.27);
+    });
+  }
+
+  public playRevive(): void {
+    this.tryPlayCustomSlot('event_revive', () => this.playReviveSynth());
   }
 
   public playLand(): void {

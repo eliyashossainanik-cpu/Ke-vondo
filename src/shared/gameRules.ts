@@ -27,6 +27,11 @@ export const KOBIRAJ_COOLDOWN_SEC = 24;
 export const MISTRI_VENT_COOLDOWN_SEC = 16;
 export const BOHURUPI_DISGUISE_DURATION_SEC = 14;
 export const BOHURUPI_COOLDOWN_SEC = 26;
+export const DAROGA_ARREST_RANGE = 3.6;
+export const DAROGA_COOLDOWN_SEC = 22;
+export const DAKTAR_REVIVE_RANGE = 3.8;
+export const JHARUDAR_CLEAN_RANGE = 3.6;
+export const JHARUDAR_CLEAN_COOLDOWN_SEC = 24;
 
 export const DEFAULT_ROOM_SETTINGS: RoomSettings = {
   vondoCount: 1,
@@ -110,21 +115,26 @@ export function assignSpecialRoles<T extends Pick<PlayerState, 'id' | 'role' | '
     }
   }
 
-  // Assign Bohurupi to one Vondo
+  // Assign Vondo special roles (Bohurupi / Jharudar)
   const vondoCandidates = shuffle(
     out.filter((p) => p.role === 'vondo' && p.specialRole === 'none'),
   );
-  if (!takenSpecials.has('bohurupi') && vondoCandidates.length > 0) {
-    vondoCandidates[0].specialRole = 'bohurupi';
-    takenSpecials.add('bohurupi');
+  const desiredVondoRoles: SpecialRole[] =
+    rng() < 0.5 ? ['bohurupi', 'jharudar'] : ['jharudar', 'bohurupi'];
+  for (const vr of desiredVondoRoles) {
+    if (takenSpecials.has(vr)) continue;
+    const nextV = vondoCandidates.shift();
+    if (!nextV) break;
+    nextV.specialRole = vr;
+    takenSpecials.add(vr);
   }
 
   // Assign Para-basi & Pagol special roles among non-Vondos
   const crewPool = shuffle(out.filter((p) => p.role === 'parabasi' && p.specialRole === 'none'));
   const desiredCrewRoles: SpecialRole[] =
     out.length >= 5
-      ? ['goyenda', 'kobiraj', 'mistri', 'pagol']
-      : ['goyenda', 'kobiraj', 'mistri'];
+      ? ['goyenda', 'kobiraj', 'mistri', 'pagol', 'daroga', 'neta', 'daktar']
+      : ['goyenda', 'kobiraj', 'mistri', 'daroga'];
 
   for (const r of desiredCrewRoles) {
     if (takenSpecials.has(r)) continue;
@@ -350,16 +360,85 @@ export function findNearestInspectableBody(goyenda: PlayerState, bodies: BodyMar
   return best;
 }
 
+export function findNearestDarogaTarget(daroga: PlayerState, players: PlayerState[]): PlayerState | null {
+  if (!daroga.alive || daroga.specialRole !== 'daroga' || daroga.inVent) return null;
+  let best: PlayerState | null = null;
+  let bestDist = DAROGA_ARREST_RANGE;
+  for (const p of players) {
+    if (!p.alive || p.id === daroga.id || p.inVent) continue;
+    const d = distance2D(daroga.x, daroga.z, p.x, p.z);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+export function resolveDarogaShot(
+  daroga: PlayerState,
+  target: PlayerState,
+): { allowed: boolean; hitVondo: boolean; backfired: boolean } {
+  if (!daroga.alive || daroga.specialRole !== 'daroga' || daroga.inVent || daroga.abilityCooldown > 0.05) {
+    return { allowed: false, hitVondo: false, backfired: false };
+  }
+  if (!target.alive || target.id === daroga.id || target.inVent) {
+    return { allowed: false, hitVondo: false, backfired: false };
+  }
+  if (distance2D(daroga.x, daroga.z, target.x, target.z) > DAROGA_ARREST_RANGE) {
+    return { allowed: false, hitVondo: false, backfired: false };
+  }
+  const hitVondo = target.role === 'vondo';
+  return { allowed: true, hitVondo, backfired: !hitVondo };
+}
+
+export function findNearestCleanableBody(jharudar: PlayerState, bodies: BodyMarker[]): BodyMarker | null {
+  if (!jharudar.alive || jharudar.specialRole !== 'jharudar' || jharudar.inVent) return null;
+  let best: BodyMarker | null = null;
+  let bestDist = JHARUDAR_CLEAN_RANGE;
+  for (const b of bodies) {
+    if (b.reported) continue;
+    const d = distance2D(jharudar.x, jharudar.z, b.x, b.z);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+export function findNearestRevivableBody(daktar: PlayerState, bodies: BodyMarker[]): BodyMarker | null {
+  if (!daktar.alive || daktar.specialRole !== 'daktar' || daktar.inVent || (daktar.revivesLeft ?? 0) <= 0) {
+    return null;
+  }
+  let best: BodyMarker | null = null;
+  let bestDist = DAKTAR_REVIVE_RANGE;
+  for (const b of bodies) {
+    if (b.reported) continue;
+    const d = distance2D(daktar.x, daktar.z, b.x, b.z);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+export function getPlayerVoteWeight(player: Pick<PlayerState, 'specialRole'>): number {
+  return player.specialRole === 'neta' ? 2 : 1;
+}
+
 export function tallyVotes(players: PlayerState[], confirmEjects = true): EjectionInfo {
   const alivePlayers = players.filter((p) => p.alive);
   const counts = new Map<string, number>();
   let skipCount = 0;
 
   for (const p of alivePlayers) {
+    const weight = getPlayerVoteWeight(p);
     if (!p.hasVoted || !p.votedFor || p.votedFor === 'skip') {
-      skipCount++;
+      skipCount += weight;
     } else {
-      counts.set(p.votedFor, (counts.get(p.votedFor) ?? 0) + 1);
+      counts.set(p.votedFor, (counts.get(p.votedFor) ?? 0) + weight);
     }
   }
 

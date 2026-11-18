@@ -24,9 +24,11 @@ import {
 import {
   BOHURUPI_COOLDOWN_SEC,
   BOHURUPI_DISGUISE_DURATION_SEC,
+  DAROGA_COOLDOWN_SEC,
   DEFAULT_ROOM_SETTINGS,
   DOOR_LOCK_COOLDOWN_SEC,
   DOOR_LOCK_DURATION_SEC,
+  JHARUDAR_CLEAN_COOLDOWN_SEC,
   KOBIRAJ_COOLDOWN_SEC,
   MISTRI_FIX_RANGE,
   MISTRI_VENT_COOLDOWN_SEC,
@@ -42,12 +44,16 @@ import {
   computeTaskProgress,
   createPlayerTasks,
   evaluateMatchOutcome,
+  findNearestCleanableBody,
+  findNearestDarogaTarget,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
+  findNearestRevivableBody,
   findNearestShieldTarget,
   getColorShadeHint,
   inspectBodyClue,
+  resolveDarogaShot,
   resolveVentHopTarget,
   sanitizeSoloConfig,
   tallyVotes,
@@ -142,6 +148,7 @@ export class SoloMatchEngine {
         tasks: [],
         killCooldownRemaining: 0,
         emergencyMeetingsLeft: settings.emergencyMeetingsPerPlayer,
+        revivesLeft: 0,
         votedFor: null,
         hasVoted: false,
       },
@@ -170,13 +177,14 @@ export class SoloMatchEngine {
         tasks: [],
         killCooldownRemaining: 0,
         emergencyMeetingsLeft: settings.emergencyMeetingsPerPlayer,
+        revivesLeft: 0,
         votedFor: null,
         hasVoted: false,
       })),
     ];
 
     const effectiveBaseRole =
-      forceSpecialRole === 'bohurupi'
+      forceSpecialRole === 'bohurupi' || forceSpecialRole === 'jharudar'
         ? 'vondo'
         : forceSpecialRole && forceSpecialRole !== 'none'
           ? 'parabasi'
@@ -210,7 +218,17 @@ export class SoloMatchEngine {
           ? createPlayerTasks(settings.tasksPerPlayer)
           : [];
       p.killCooldownRemaining = p.role === 'vondo' ? Math.min(12, settings.killCooldownSec) : 0;
-      p.abilityCooldown = p.specialRole === 'bohurupi' || p.specialRole === 'kobiraj' ? 6 : 0;
+      p.abilityCooldown =
+        p.specialRole === 'bohurupi' ||
+        p.specialRole === 'kobiraj' ||
+        p.specialRole === 'daroga' ||
+        p.specialRole === 'jharudar'
+          ? 6
+          : 0;
+      p.revivesLeft = p.specialRole === 'daktar' ? 1 : 0;
+      if (p.specialRole === 'neta') {
+        p.emergencyMeetingsLeft = settings.emergencyMeetingsPerPlayer + 1;
+      }
       if (p.isBot) {
         this.brains.set(p.id, {
           wpIdx: Math.floor(Math.random() * BOT_WAYPOINTS.length),
@@ -428,6 +446,102 @@ export class SoloMatchEngine {
       this.onClueNotice?.(
         'Bohurupi Shapeshift',
         `Disguised as ${chosen.name} for ${BOHURUPI_DISGUISE_DURATION_SEC}s!`,
+      );
+      return;
+    }
+
+    if (lp.specialRole === 'daroga') {
+      if (lp.abilityCooldown > 0.05) return;
+      const target = targetId
+        ? this.snapshot.players.find((p) => p.id === targetId)
+        : findNearestDarogaTarget(lp, this.snapshot.players);
+      if (!target) {
+        this.onClueNotice?.('Para Daroga', 'Move close to a suspect to make an Arrest Shot!');
+        return;
+      }
+      const res = resolveDarogaShot(lp, target);
+      if (!res.allowed) return;
+      soundEngine.playDarogaShot();
+      if (res.hitVondo) {
+        target.alive = false;
+        target.watchingCams = false;
+        lp.abilityCooldown = DAROGA_COOLDOWN_SEC;
+        this.snapshot.bodies.push({
+          id: `body_${Date.now()}_${target.id}`,
+          victimId: target.id,
+          victimName: target.name,
+          color: target.color,
+          x: target.x,
+          z: target.z,
+          reported: false,
+          killedAt: Date.now(),
+          killerColorHint: getColorShadeHint(lp.color),
+          killerZoneHint: getZoneNameAt(target.x, target.z),
+        });
+        this.onClueNotice?.(
+          'Daroga Bullseye!',
+          `${target.name} CHILO ASLI BATPAR! Size kore diso!`,
+        );
+      } else {
+        lp.alive = false;
+        lp.watchingCams = false;
+        this.snapshot.bodies.push({
+          id: `body_${Date.now()}_${lp.id}`,
+          victimId: lp.id,
+          victimName: lp.name,
+          color: lp.color,
+          x: lp.x,
+          z: lp.z,
+          reported: false,
+          killedAt: Date.now(),
+          killerColorHint: getColorShadeHint(lp.color),
+          killerZoneHint: getZoneNameAt(lp.x, lp.z),
+        });
+        this.onClueNotice?.(
+          'Daroga Misfire!',
+          `${target.name} niraparadh Para-basi chilo! Ulto tomar job gelo!`,
+        );
+      }
+      this.checkWin();
+      return;
+    }
+
+    if (lp.specialRole === 'daktar') {
+      if ((lp.revivesLeft ?? 0) <= 0) return;
+      const body = findNearestRevivableBody(lp, this.snapshot.bodies);
+      if (!body) {
+        this.onClueNotice?.('Para Daktar', 'Move near an unreported fallen body to apply Saline!');
+        return;
+      }
+      const victim = this.snapshot.players.find((p) => p.id === body.victimId);
+      if (!victim) return;
+      this.snapshot.bodies = this.snapshot.bodies.filter((b) => b.id !== body.id);
+      victim.alive = true;
+      victim.x = body.x;
+      victim.z = body.z;
+      lp.revivesLeft = Math.max(0, (lp.revivesLeft ?? 1) - 1);
+      lp.abilityCooldown = 10;
+      soundEngine.playRevive();
+      this.onClueNotice?.(
+        'Saline Revive Success!',
+        `${victim.name} ke Para Daktar bachaye tulsen!`,
+      );
+      return;
+    }
+
+    if (lp.specialRole === 'jharudar') {
+      if (lp.abilityCooldown > 0.05) return;
+      const body = findNearestCleanableBody(lp, this.snapshot.bodies);
+      if (!body) {
+        this.onClueNotice?.('Safai Batpar', 'Move near an unreported fallen body to clean it!');
+        return;
+      }
+      this.snapshot.bodies = this.snapshot.bodies.filter((b) => b.id !== body.id);
+      lp.abilityCooldown = JHARUDAR_CLEAN_COOLDOWN_SEC;
+      soundEngine.playCleanBody();
+      this.onClueNotice?.(
+        'Lash Gayeb!',
+        `Cleaned ${body.victimName}'s body — nobody can report it now!`,
       );
     }
   }
@@ -720,8 +834,35 @@ export class SoloMatchEngine {
         const brain = this.brains.get(p.id);
         if (!brain) continue;
 
+        // Bot Jharudar sweeps nearby unreported body instead of reporting
+        if (p.specialRole === 'jharudar' && p.abilityCooldown <= 0.05) {
+          const cleanTarget = findNearestCleanableBody(p, this.snapshot.bodies);
+          if (cleanTarget && Math.random() < 0.14) {
+            this.snapshot.bodies = this.snapshot.bodies.filter((b) => b.id !== cleanTarget.id);
+            p.abilityCooldown = JHARUDAR_CLEAN_COOLDOWN_SEC;
+            continue;
+          }
+        }
+
+        // Bot Daktar revives nearby unreported body once
+        if (p.specialRole === 'daktar' && (p.revivesLeft ?? 0) > 0) {
+          const revBody = findNearestRevivableBody(p, this.snapshot.bodies);
+          if (revBody && Math.random() < 0.16) {
+            const victim = this.snapshot.players.find((pl) => pl.id === revBody.victimId);
+            if (victim) {
+              this.snapshot.bodies = this.snapshot.bodies.filter((b) => b.id !== revBody.id);
+              victim.alive = true;
+              victim.x = revBody.x;
+              victim.z = revBody.z;
+              p.revivesLeft = 0;
+              soundEngine.playRevive();
+              continue;
+            }
+          }
+        }
+
         const body = findNearestReportableBody(p, this.snapshot.bodies);
-        if (body && (p.role === 'parabasi' || Math.random() < 0.03)) {
+        if (body && (p.role === 'parabasi' || (p.specialRole !== 'jharudar' && Math.random() < 0.03))) {
           body.reported = true;
           this.startMeeting(p, 'body', body.victimName);
           return;
@@ -932,7 +1073,7 @@ export class SoloMatchEngine {
         }
         this.snapshot.bodies = [];
         this.snapshot.phase = 'ejecting';
-        this.phaseTimer = 3.0;
+        this.phaseTimer = 4.2;
       }
     } else if (this.snapshot.phase === 'ejecting') {
       this.phaseTimer -= dt;

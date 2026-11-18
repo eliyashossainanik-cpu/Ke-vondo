@@ -11,7 +11,17 @@ export type GamePhase =
 
 export type PlayerRole = 'parabasi' | 'vondo';
 
-export type SpecialRole = 'none' | 'goyenda' | 'kobiraj' | 'mistri' | 'bohurupi' | 'pagol';
+export type SpecialRole =
+  | 'none'
+  | 'goyenda'
+  | 'kobiraj'
+  | 'mistri'
+  | 'daroga'
+  | 'neta'
+  | 'daktar'
+  | 'bohurupi'
+  | 'jharudar'
+  | 'pagol';
 
 export interface SpecialRoleMeta {
   id: SpecialRole;
@@ -60,6 +70,33 @@ export const SPECIAL_ROLES: Record<SpecialRole, SpecialRoleMeta> = {
     abilityLabel: 'Dren e Dhuko [V]',
     shortDesc: 'Dren diye palay jete parbe ar dur thekei DESCO/Wi-Fi jhamela thik korte parbe!',
   },
+  daroga: {
+    id: 'daroga',
+    title: 'Daroga (Para Sheriff)',
+    banglaTitle: 'পাড়া দারোগা',
+    faction: 'parabasi',
+    accentHex: '#f97316',
+    abilityLabel: 'Batpar Arrest [G]',
+    shortDesc: 'Asli Batpar ke dhorle ek shot e size! Kintu niraparadh Para-basi ke marle nijei out hobe!',
+  },
+  neta: {
+    id: 'neta',
+    title: 'Neta (Moholla Mayor)',
+    banglaTitle: 'মহল্লা নেতা',
+    faction: 'parabasi',
+    accentHex: '#facc15',
+    abilityLabel: '2x Vote + Extra Bell',
+    shortDesc: 'Shalish e tomar vote 2 ta hisebe count hobe ar extra 1 ta Adda Bell pabe!',
+  },
+  daktar: {
+    id: 'daktar',
+    title: 'Daktar (Para Doctor)',
+    banglaTitle: 'পাড়া ডাক্তার',
+    faction: 'parabasi',
+    accentHex: '#2dd4bf',
+    abilityLabel: 'Saline Revive [G]',
+    shortDesc: 'Match e 1 bar unreported fallen neighbor ke Saline diye live bachaye tulte parbe!',
+  },
   bohurupi: {
     id: 'bohurupi',
     title: 'Bohurupi Batpar',
@@ -68,6 +105,15 @@ export const SPECIAL_ROLES: Record<SpecialRole, SpecialRoleMeta> = {
     accentHex: '#fb7185',
     abilityLabel: 'Chehara Bodlaw [G]',
     shortDesc: 'Onno Para-basir besh dhore tader ke CCTV te fashaye daw!',
+  },
+  jharudar: {
+    id: 'jharudar',
+    title: 'Jharudar (Safai Batpar)',
+    banglaTitle: 'সাফাই বাটপার',
+    faction: 'vondo',
+    accentHex: '#f43f5e',
+    abilityLabel: 'Clean Lash [G]',
+    shortDesc: 'Size korar por fallen body clean kore gayeb kore dao jeno keu report korte na pare!',
   },
   pagol: {
     id: 'pagol',
@@ -217,6 +263,7 @@ export interface PlayerState {
   tasks: PlayerTaskState[];
   killCooldownRemaining: number;
   emergencyMeetingsLeft: number;
+  revivesLeft?: number;
   votedFor: string | null; // playerId | 'skip' | null
   hasVoted: boolean;
 }
@@ -369,7 +416,21 @@ export type ServerMessage =
   | { type: 'room:error'; message: string }
   | { type: 'clue:result'; title: string; detail: string }
   | { type: 'meme:play'; memeId: string }
+  | { type: 'memes:updated'; updatedAt: number }
   | {
       type: 'sfx:event';
-      kind: 'kill' | 'report' | 'meeting' | 'sabotage' | 'task' | 'eject' | 'vent' | 'door' | 'shield' | 'disguise';
+      kind:
+        | 'kill'
+        | 'report'
+        | 'meeting'
+        | 'sabotage'
+        | 'task'
+        | 'eject'
+        | 'vent'
+        | 'door'
+        | 'shield'
+        | 'disguise'
+        | 'daroga'
+        | 'clean'
+        | 'revive';
     };

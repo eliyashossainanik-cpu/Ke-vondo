@@ -50,7 +50,10 @@ export async function enterMobileFullscreenAndLandscape(): Promise<boolean> {
 
 export async function exitFullscreenMode(): Promise<void> {
   if (typeof document === 'undefined') return;
-  const doc = document as Document & { webkitExitFullscreen?: () => Promise<void> | void };
+  const doc = document as Document & {
+    webkitFullscreenElement?: Element | null;
+    webkitExitFullscreen?: () => Promise<void> | void;
+  };
   try {
     if (doc.fullscreenElement && doc.exitFullscreen) {
       await doc.exitFullscreen();

@@ -105,128 +105,97 @@ export function EjectionModal({ ejection }: { ejection: EjectionInfo }) {
     ? PLAYER_COLORS.find((col) => col.id === ejection.ejectedColor) ?? PLAYER_COLORS[0]
     : null;
 
+  if (ejection.reason === 'voted' && ejection.ejectedName) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="fixed inset-0 z-30 pointer-events-none flex flex-col justify-between p-3 sm:p-6"
+      >
+        {/* Top Live Crowd Comedy Banner (center stays open so players watch the live 3D Pukur throw!) */}
+        <div className="max-w-2xl w-full mx-auto text-center space-y-2 pt-1 sm:pt-2">
+          <div className="inline-flex flex-wrap items-center justify-center gap-2">
+            <span className="px-3 py-1 rounded-xl bg-amber-400 text-slate-950 font-display font-extrabold text-xs sm:text-sm shadow-lg">
+              1... 2... 3... CHUBANI!!
+            </span>
+            <span className="px-2.5 py-1 rounded-xl bg-slate-900/90 border border-sky-400/50 text-sky-200 font-bold text-xs shadow-lg">
+              &ldquo;Batpari Chharbi?!&rdquo;
+            </span>
+            <span className="px-2.5 py-1 rounded-xl bg-slate-900/90 border border-rose-400/50 text-rose-200 font-bold text-xs shadow-lg">
+              &ldquo;Pukur e Jaa!&rdquo;
+            </span>
+          </div>
+        </div>
+
+        {/* Bottom Verdict Card */}
+        <div
+          className="max-w-xl w-full mx-auto rounded-2xl px-4 py-3.5 sm:px-6 sm:py-4 border border-sky-400/40 shadow-2xl text-center space-y-1.5"
+          style={{ backgroundColor: 'rgba(9, 15, 28, 0.9)' }}
+        >
+          <div className="flex items-center justify-center gap-2.5">
+            <span
+              className="w-4 h-4 rounded-full border-2 border-amber-300 shrink-0"
+              style={{ backgroundColor: c?.hex ?? '#e11d48' }}
+            />
+            <h2 className="font-display text-xl sm:text-3xl font-extrabold text-white">
+              {ejection.ejectedName} ke Pukur e Chubani Deowa Holo!
+            </h2>
+          </div>
+
+          {ejection.confirmEjects ? (
+            <p
+              className={`text-sm sm:text-base font-bold ${
+                ejection.wasSpecialRole === 'pagol'
+                  ? 'text-purple-300'
+                  : ejection.wasVondo
+                    ? 'text-emerald-300'
+                    : 'text-rose-300'
+              }`}
+            >
+              {ejection.wasSpecialRole === 'pagol'
+                ? `${ejection.ejectedName} CHILO ASLI PAGLA BABA! Shobai bait kheye gese!`
+                : ejection.wasVondo
+                  ? `${ejection.ejectedName} CHILO ASLI BATPAR${
+                      ejection.wasSpecialRole !== 'none'
+                        ? ` (${SPECIAL_ROLES[ejection.wasSpecialRole].title})`
+                        : ''
+                    }!`
+                  : `${ejection.ejectedName} niraparadh Para-basi chilo (${
+                      ejection.wasSpecialRole !== 'none'
+                        ? SPECIAL_ROLES[ejection.wasSpecialRole].title
+                        : 'Neighbor'
+                    })...`}
+            </p>
+          ) : (
+            <p className="text-xs sm:text-sm font-semibold text-slate-300">
+              Confirm Ejects is OFF — ke Batpar chilo sheta gopon thaklo!
+            </p>
+          )}
+
+          {ejection.confirmEjects && (
+            <p className="text-xs font-mono-tabular text-amber-300">
+              Batpars remaining in Moholla: {ejection.remainingVondos}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       role="status"
       aria-live="polite"
       className="fixed inset-0 z-30 flex items-center justify-center p-6"
-      style={{ backgroundColor: 'rgba(6, 10, 18, 0.94)' }}
+      style={{ backgroundColor: 'rgba(6, 10, 18, 0.92)' }}
     >
       <div className="max-w-lg w-full text-center space-y-4">
-        {ejection.reason === 'voted' && ejection.ejectedName ? (
-          <>
-            {/* Animated Pukur Chubani Scene */}
-            <div className="mx-auto w-64 h-40 rounded-2xl border border-sky-400/35 bg-slate-950 overflow-hidden relative shadow-2xl">
-              <svg viewBox="0 0 260 160" className="w-full h-full" aria-hidden="true">
-                {/* Night Sky Stars */}
-                <circle cx="34" cy="24" r="1.4" fill="#fde68a" opacity="0.8" />
-                <circle cx="92" cy="18" r="1.1" fill="#e2e8f0" opacity="0.7" />
-                <circle cx="212" cy="28" r="1.5" fill="#fde68a" opacity="0.85" />
-                <circle cx="172" cy="16" r="1.1" fill="#bae6fd" opacity="0.7" />
-
-                {/* Tumbling Ejected Crewmate */}
-                <g>
-                  <animateTransform
-                    attributeName="transform"
-                    type="translate"
-                    from="55 -10"
-                    to="128 118"
-                    dur="1.45s"
-                    fill="freeze"
-                  />
-                  <g>
-                    <animateTransform
-                      attributeName="transform"
-                      type="rotate"
-                      from="-15 0 0"
-                      to="340 0 0"
-                      dur="1.45s"
-                      repeatCount="1"
-                      fill="freeze"
-                    />
-                    <rect
-                      x="-14"
-                      y="-18"
-                      width="28"
-                      height="36"
-                      rx="13"
-                      fill={c?.hex ?? '#e11d48'}
-                      stroke="#fbbf24"
-                      strokeWidth="2.5"
-                    />
-                    <rect x="-2" y="-11" width="16" height="10" rx="5" fill="#bae6fd" stroke="#0f172a" strokeWidth="1.5" />
-                  </g>
-                </g>
-
-                {/* Pukur Water Surface */}
-                <path
-                  d="M0 108 Q32 100 65 108 T130 108 T195 108 T260 108 L260 160 L0 160 Z"
-                  fill="#0284c7"
-                  opacity="0.82"
-                />
-                <path
-                  d="M0 118 Q40 112 80 118 T160 118 T260 118 L260 160 L0 160 Z"
-                  fill="#0369a1"
-                  opacity="0.92"
-                />
-
-                {/* Animated Water Splash Ring & Droplets */}
-                <ellipse cx="130" cy="112" rx="6" ry="2.5" fill="none" stroke="#bae6fd" strokeWidth="2.2" opacity="0">
-                  <animate attributeName="opacity" values="0;0;0.95;0" keyTimes="0;0.7;0.82;1" dur="2.1s" fill="freeze" />
-                  <animate attributeName="rx" values="6;6;42;56" keyTimes="0;0.7;0.85;1" dur="2.1s" fill="freeze" />
-                  <animate attributeName="ry" values="2;2;9;12" keyTimes="0;0.7;0.85;1" dur="2.1s" fill="freeze" />
-                </ellipse>
-                <circle cx="114" cy="96" r="3" fill="#7dd3fc" opacity="0">
-                  <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.72;0.85;1" dur="2.1s" fill="freeze" />
-                  <animate attributeName="cy" values="108;108;74;98" keyTimes="0;0.72;0.86;1" dur="2.1s" fill="freeze" />
-                </circle>
-                <circle cx="146" cy="96" r="3" fill="#7dd3fc" opacity="0">
-                  <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.72;0.85;1" dur="2.1s" fill="freeze" />
-                  <animate attributeName="cy" values="108;108;70;96" keyTimes="0;0.72;0.86;1" dur="2.1s" fill="freeze" />
-                </circle>
-              </svg>
-            </div>
-            <h2 className="font-display text-3xl sm:text-4xl font-extrabold text-white">
-              {ejection.ejectedName} ke Pukur e Chubani Deowa Holo!
-            </h2>
-            {ejection.confirmEjects ? (
-              <p
-                className={`text-lg font-bold ${
-                  ejection.wasSpecialRole === 'pagol'
-                    ? 'text-purple-400'
-                    : ejection.wasVondo
-                      ? 'text-emerald-400'
-                      : 'text-rose-400'
-                }`}
-              >
-                {ejection.wasSpecialRole === 'pagol'
-                  ? `${ejection.ejectedName} CHILO ASLI PAGLA BABA! Haaha — shobai kheye gese bait!`
-                  : ejection.wasVondo
-                    ? `${ejection.ejectedName} CHILO ASLI BATPAR${
-                        ejection.wasSpecialRole !== 'none'
-                          ? ` (${SPECIAL_ROLES[ejection.wasSpecialRole].title})`
-                          : ''
-                      }!`
-                    : `${ejection.ejectedName} bechara niraparadh Para-basi chilo (${
-                        ejection.wasSpecialRole !== 'none'
-                          ? SPECIAL_ROLES[ejection.wasSpecialRole].title
-                          : 'Neighbor'
-                      })...`}
-              </p>
-            ) : (
-              <p className="text-base font-semibold text-slate-300">
-                Confirm Ejects is OFF — ke Batpar chilo sheta gopon thaklo!
-              </p>
-            )}
-          </>
-        ) : (
-          <>
-            <h2 className="font-display text-3xl font-extrabold text-white">
-              {ejection.reason === 'tie' ? 'Vote Tai Hoye Gese — Keu Pukur e Jabe Na!' : 'Shalish Skip — Keu Chubani Khay Nai!'}
-            </h2>
-            <p className="text-sm text-slate-300">Asli Batpar ekhono mohollay ghurtese!</p>
-          </>
-        )}
+        <h2 className="font-display text-3xl font-extrabold text-white">
+          {ejection.reason === 'tie'
+            ? 'Vote Tai Hoye Gese — Keu Pukur e Jabe Na!'
+            : 'Shalish Skip — Keu Chubani Khay Nai!'}
+        </h2>
+        <p className="text-sm text-slate-300">Asli Batpar ekhono mohollay ghurtese!</p>
         {ejection.confirmEjects && (
           <p className="text-xs font-mono-tabular text-amber-300">
             Batpars remaining in Moholla: {ejection.remainingVondos}

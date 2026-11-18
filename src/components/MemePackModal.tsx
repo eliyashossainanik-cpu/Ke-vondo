@@ -1,17 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   MEME_SLOTS,
-  clearAllClips,
-  clearSlotClip,
+  doesServerRequirePin,
   exportMemePackJson,
   getLoadedCustomCount,
+  getRawClipBuffer,
+  getServerClipCount,
   getSlotMeta,
   hasCustomClip,
   importMemePackJson,
+  isServerClip,
   matchFilenameToSlot,
-  setSlotAudioClip,
-  setSlotCustomLabel,
   subscribeMemePack,
+  syncServerMemePack,
+  uploadSlotAudioToServer,
+  saveSlotLabelToServer,
+  deleteSlotAudioFromServer,
+  clearAllServerMemes,
   type MemeSlotId,
 } from '../audio/memePackStore';
 import { soundEngine } from '../audio/soundEngine';
@@ -25,6 +30,9 @@ import {
   Music2,
   RotateCcw,
   Sparkles,
+  Globe,
+  KeyRound,
+  RefreshCw,
 } from 'lucide-react';
 
 export interface MemePackModalProps {
@@ -35,48 +43,94 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
   const [, setVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<'event' | 'quick'>('event');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [adminPin, setAdminPin] = useState('');
+  const [showPinInput, setShowPinInput] = useState(() => doesServerRequirePin());
   const bulkInputRef = useRef<HTMLInputElement | null>(null);
   const importPackRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    void syncServerMemePack();
     return subscribeMemePack(() => setVersion((v) => v + 1));
   }, []);
 
   const customCount = getLoadedCustomCount();
+  const serverCount = getServerClipCount();
+  const requiresPin = doesServerRequirePin();
+  const eventCount = MEME_SLOTS.filter((s) => s.category === 'event').length;
+  const quickCount = MEME_SLOTS.filter((s) => s.category === 'quick').length;
   const visibleSlots = MEME_SLOTS.filter((s) => s.category === activeTab);
 
   const handleUploadSingle = async (slotId: MemeSlotId, file: File | null) => {
     if (!file) return;
+    setErrorMsg(null);
+    setBusy(true);
     try {
       const buf = await file.arrayBuffer();
-      await setSlotAudioClip(slotId, file.name, file.type, buf);
+      const res = await uploadSlotAudioToServer(
+        slotId,
+        file.name,
+        file.type,
+        buf,
+        undefined,
+        adminPin.trim() || undefined,
+      );
       soundEngine.invalidateDecodedSlot(slotId);
-      setStatusMsg(`Loaded "${file.name}" into slot!`);
+      if (res.ok) {
+        setStatusMsg(`Published "${file.name}" to Server! All players hear it now.`);
+      } else {
+        setErrorMsg(res.error ?? 'Could not upload to server.');
+      }
       soundEngine.testSlot(slotId);
     } catch {
-      setStatusMsg(`Could not load "${file.name}". Try .mp3, .wav, or .ogg.`);
+      setErrorMsg(`Could not load "${file.name}". Try .mp3, .wav, or .ogg under 6MB.`);
+    } finally {
+      setBusy(false);
     }
   };
 
   const handleBulkUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    setErrorMsg(null);
+    setBusy(true);
     const used = new Set<MemeSlotId>();
     let loaded = 0;
+    let failed = 0;
     for (const file of Array.from(files)) {
       const target = matchFilenameToSlot(file.name, used);
       if (!target) break;
       used.add(target);
-      const buf = await file.arrayBuffer();
-      await setSlotAudioClip(target, file.name, file.type, buf);
-      soundEngine.invalidateDecodedSlot(target);
-      loaded++;
+      try {
+        const buf = await file.arrayBuffer();
+        const res = await uploadSlotAudioToServer(
+          target,
+          file.name,
+          file.type,
+          buf,
+          undefined,
+          adminPin.trim() || undefined,
+        );
+        soundEngine.invalidateDecodedSlot(target);
+        if (res.ok) loaded++;
+        else failed++;
+      } catch {
+        failed++;
+      }
     }
-    setStatusMsg(`Auto-loaded ${loaded} meme audio file${loaded === 1 ? '' : 's'} into your pack!`);
+    setBusy(false);
+    if (failed > 0 && loaded === 0) {
+      setErrorMsg('Server rejected bulk upload (check Admin PIN or 6MB file limit).');
+    } else {
+      setStatusMsg(
+        `Server-published ${loaded} viral Bangla meme clip${loaded === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}!`,
+      );
+    }
   };
 
   const handleExportPack = () => {
     if (customCount === 0) {
-      setStatusMsg('Upload at least 1 custom audio clip before exporting a pack.');
+      setErrorMsg('Upload at least 1 custom audio clip before exporting a pack.');
       return;
     }
     const json = exportMemePackJson();
@@ -94,13 +148,34 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
 
   const handleImportPack = async (file: File | null) => {
     if (!file) return;
+    setErrorMsg(null);
+    setBusy(true);
     try {
       const text = await file.text();
       const count = await importMemePackJson(text);
       soundEngine.invalidateDecodedSlot();
-      setStatusMsg(`Imported ${count} custom meme clips from "${file.name}"!`);
+      // Push imported clips to server so all multiplayer peers receive them
+      let synced = 0;
+      for (const s of MEME_SLOTS) {
+        const buf = getRawClipBuffer(s.id);
+        const meta = getSlotMeta(s.id);
+        if (buf && meta) {
+          const res = await uploadSlotAudioToServer(
+            s.id,
+            meta.fileName || `${s.id}.mp3`,
+            meta.mimeType || 'audio/mpeg',
+            buf,
+            meta.customLabel,
+            adminPin.trim() || undefined,
+          );
+          if (res.ok) synced++;
+        }
+      }
+      setStatusMsg(`Imported ${count} clips and synced ${synced} to the live game server!`);
     } catch {
-      setStatusMsg('Invalid meme pack JSON file.');
+      setErrorMsg('Invalid meme pack JSON file.');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -108,9 +183,9 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Original Meme Audio Pack Manager"
+      aria-label="Server Viral Bangla Meme Admin Panel"
       className="fixed inset-0 z-40 flex items-center justify-center p-2.5 sm:p-6"
-      style={{ backgroundColor: 'rgba(6, 10, 18, 0.86)' }}
+      style={{ backgroundColor: 'rgba(6, 10, 18, 0.88)' }}
     >
       <div
         className="w-full max-w-4xl rounded-2xl border border-amber-400/35 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
@@ -123,11 +198,17 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
               <Music2 className="w-5 h-5 text-amber-300" />
             </div>
             <div className="min-w-0">
-              <h2 className="font-display text-lg sm:text-xl font-bold text-white truncate">
-                Original Bangla Meme Pack Manager
-              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="font-display text-lg sm:text-xl font-bold text-white truncate">
+                  Viral Bangla Meme Admin Panel
+                </h2>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/35 text-emerald-300 text-[10px] font-bold flex items-center gap-1">
+                  <Globe className="w-3 h-3" />
+                  Server Live: {serverCount}/{MEME_SLOTS.length}
+                </span>
+              </div>
               <p className="text-xs text-slate-400 truncate">
-                Upload your own MP3/WAV/OGG meme clips — saved in browser IndexedDB ({customCount}/{MEME_SLOTS.length} custom)
+                Upload MP3/WAV/OGG once here — auto-syncs to Server so every multiplayer friend hears them!
               </p>
             </div>
           </div>
@@ -153,7 +234,7 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                 activeTab === 'event' ? 'bg-amber-400 text-slate-950' : 'text-slate-300 hover:text-white'
               }`}
             >
-              Auto Event Sounds (10)
+              Auto Event Sounds ({eventCount})
             </button>
             <button
               type="button"
@@ -162,7 +243,7 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                 activeTab === 'quick' ? 'bg-amber-400 text-slate-950' : 'text-slate-300 hover:text-white'
               }`}
             >
-              Quick Soundboard [1-6]
+              Quick Soundboard ({quickCount})
             </button>
           </div>
 
@@ -175,7 +256,7 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
               multiple
               className="hidden"
               onChange={(e) => {
-                handleBulkUpload(e.target.files);
+                void handleBulkUpload(e.target.files);
                 e.target.value = '';
               }}
             />
@@ -185,23 +266,25 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
               accept=".json,application/json"
               className="hidden"
               onChange={(e) => {
-                handleImportPack(e.target.files?.[0] ?? null);
+                void handleImportPack(e.target.files?.[0] ?? null);
                 e.target.value = '';
               }}
             />
 
             <button
               type="button"
+              disabled={busy}
               onClick={() => bulkInputRef.current?.click()}
-              className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5"
+              className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center gap-1.5"
             >
               <FolderUp className="w-3.5 h-3.5" />
-              Bulk Auto-Load Audio
+              Bulk Upload Audio
             </button>
             <button
               type="button"
+              disabled={busy}
               onClick={() => importPackRef.current?.click()}
-              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5"
+              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs flex items-center gap-1.5"
             >
               <Upload className="w-3.5 h-3.5" />
               Import .JSON
@@ -214,13 +297,45 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
               <Download className="w-3.5 h-3.5" />
               Export Pack
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                void syncServerMemePack().then(() => {
+                  soundEngine.invalidateDecodedSlot();
+                  setStatusMsg('Synced latest meme pack from game server!');
+                });
+              }}
+              aria-label="Sync from Server"
+              className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 font-semibold text-xs flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Sync
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowPinInput((v) => !v)}
+              className={`px-2.5 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1 ${
+                requiresPin || adminPin
+                  ? 'bg-amber-950/70 border-amber-500/40 text-amber-200'
+                  : 'bg-slate-800 border-slate-700 text-slate-300'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              PIN
+            </button>
             {customCount > 0 && (
               <button
                 type="button"
+                disabled={busy}
                 onClick={() => {
-                  clearAllClips().then(() => {
+                  setErrorMsg(null);
+                  void clearAllServerMemes(adminPin.trim() || undefined).then((res) => {
                     soundEngine.invalidateDecodedSlot();
-                    setStatusMsg('Reset all slots back to built-in funny sound synths.');
+                    if (res.ok) {
+                      setStatusMsg('Reset all server & browser slots back to built-in synths.');
+                    } else {
+                      setErrorMsg(res.error ?? 'Failed to clear server slots.');
+                    }
                   });
                 }}
                 className="px-2.5 py-2 rounded-xl bg-rose-950/90 hover:bg-rose-900 border border-rose-500/35 text-rose-200 font-semibold text-xs flex items-center gap-1"
@@ -231,6 +346,29 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
             )}
           </div>
         </div>
+
+        {(showPinInput || requiresPin) && (
+          <div className="px-4 sm:px-6 py-2 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center gap-2 text-xs">
+            <label htmlFor="meme-admin-pin" className="font-semibold text-amber-200 flex items-center gap-1.5">
+              <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+              Admin Passcode{requiresPin ? ' (Required by Server):' : ' (Optional if ADMIN_PASSCODE unset):'}
+            </label>
+            <input
+              id="meme-admin-pin"
+              type="password"
+              value={adminPin}
+              onChange={(e) => setAdminPin(e.target.value)}
+              placeholder="Enter admin passcode..."
+              className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-amber-400"
+            />
+          </div>
+        )}
+
+        {errorMsg && (
+          <div role="alert" className="px-4 sm:px-6 py-2 bg-rose-950/80 border-b border-rose-500/40 text-xs text-rose-200">
+            {errorMsg}
+          </div>
+        )}
 
         {statusMsg && (
           <div className="px-4 sm:px-6 py-2 bg-amber-950/50 border-b border-amber-500/30 text-xs text-amber-200 flex items-center gap-2">
@@ -244,15 +382,18 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
           {visibleSlots.map((slot) => {
             const meta = getSlotMeta(slot.id);
             const hasClip = hasCustomClip(slot.id);
+            const onServer = isServerClip(slot.id);
             const inputId = `upload_${slot.id}`;
 
             return (
               <div
                 key={slot.id}
                 className={`rounded-xl p-3.5 border flex flex-col gap-2.5 ${
-                  hasClip
+                  onServer
                     ? 'bg-emerald-950/25 border-emerald-500/45'
-                    : 'bg-slate-900/90 border-slate-800'
+                    : hasClip
+                      ? 'bg-sky-950/25 border-sky-500/40'
+                      : 'bg-slate-900/90 border-slate-800'
                 }`}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -272,12 +413,14 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
 
                   <span
                     className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 ${
-                      hasClip
+                      onServer
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
-                        : 'bg-slate-800 text-slate-400'
+                        : hasClip
+                          ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
+                          : 'bg-slate-800 text-slate-400'
                     }`}
                   >
-                    {hasClip ? 'Custom Clip' : 'Default Synth'}
+                    {onServer ? 'Server Live' : hasClip ? 'Local Clip' : 'Default Synth'}
                   </span>
                 </div>
 
@@ -292,7 +435,13 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                       maxLength={22}
                       value={meta?.customLabel ?? ''}
                       placeholder={slot.defaultLabel}
-                      onChange={(e) => setSlotCustomLabel(slot.id, e.target.value)}
+                      onChange={(e) => {
+                        void saveSlotLabelToServer(
+                          slot.id,
+                          e.target.value,
+                          adminPin.trim() || undefined,
+                        );
+                      }}
                       className="flex-1 px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs text-amber-200 focus:outline-none focus:border-amber-400"
                     />
                   </div>
@@ -311,7 +460,7 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                     accept="audio/*"
                     className="hidden"
                     onChange={(e) => {
-                      handleUploadSingle(slot.id, e.target.files?.[0] ?? null);
+                      void handleUploadSingle(slot.id, e.target.files?.[0] ?? null);
                       e.target.value = '';
                     }}
                   />
@@ -320,7 +469,7 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                     className="flex-1 min-h-[38px] px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                   >
                     <Upload className="w-3.5 h-3.5" />
-                    {hasClip ? 'Replace Audio' : 'Upload MP3 / WAV'}
+                    {hasClip ? 'Replace Server Audio' : 'Upload to Server'}
                   </label>
 
                   <button
@@ -337,8 +486,10 @@ export function MemePackModal({ onClose }: MemePackModalProps) {
                     <button
                       type="button"
                       onClick={() => {
-                        clearSlotClip(slot.id).then(() => {
+                        setErrorMsg(null);
+                        void deleteSlotAudioFromServer(slot.id, adminPin.trim() || undefined).then((res) => {
                           soundEngine.invalidateDecodedSlot(slot.id);
+                          if (!res.ok && res.error) setErrorMsg(res.error);
                         });
                       }}
                       aria-label={`Reset ${slot.defaultLabel}`}

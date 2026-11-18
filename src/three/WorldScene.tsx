@@ -1260,6 +1260,45 @@ export function WorldScene({
     sabotageBeacon.visible = false;
     scene.add(sabotageBeacon);
 
+    // Pooled Pukur Chubani Water Splash Effect (torus ring + 14 sky-blue droplets)
+    const splashRingMat = new THREE.MeshBasicMaterial({
+      color: '#bae6fd',
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const splashRingGeo = new THREE.RingGeometry(0.45, 0.85, 28);
+    const splashRing = new THREE.Mesh(splashRingGeo, splashRingMat);
+    splashRing.rotation.x = -Math.PI / 2;
+    splashRing.position.set(-45.8, 0.14, 0);
+    splashRing.visible = false;
+    scene.add(splashRing);
+
+    const SPLASH_DROPLET_COUNT = 14;
+    const splashDropletGeo = new THREE.SphereGeometry(0.16, 8, 8);
+    const splashDropletMat = new THREE.MeshBasicMaterial({
+      color: '#7dd3fc',
+      transparent: true,
+      opacity: 0.92,
+    });
+    const splashDroplets: Array<{ mesh: THREE.Mesh; angle: number; speed: number; peak: number }> = [];
+    for (let i = 0; i < SPLASH_DROPLET_COUNT; i++) {
+      const m = new THREE.Mesh(splashDropletGeo, splashDropletMat);
+      m.visible = false;
+      scene.add(m);
+      splashDroplets.push({
+        mesh: m,
+        angle: (i / SPLASH_DROPLET_COUNT) * Math.PI * 2 + (i % 2) * 0.2,
+        speed: 1.8 + (i % 4) * 0.65,
+        peak: 2.0 + (i % 3) * 0.75,
+      });
+    }
+
+    let lastObservedPhase: GamePhase = phaseRef.current;
+    let ejectionStartAt = 0;
+    let ejectionSplashFired = false;
+
     const playerRigs = new Map<
       string,
       {
@@ -1579,9 +1618,18 @@ export function WorldScene({
           initializedLocalFromSnap = true;
         }
 
-        const visible = !p.inVent && (p.alive || isLocal || (localPlayer && !localPlayer.alive));
+        const isVotedEjectCutscene =
+          snap.phase === 'ejecting' &&
+          snap.ejection?.reason === 'voted' &&
+          Boolean(snap.ejection.ejectedId);
+        const ejectT = isVotedEjectCutscene ? Math.max(0, elapsed - ejectionStartAt) : 0;
+        const isEjectedActor = isVotedEjectCutscene && p.id === snap.ejection?.ejectedId;
+
+        const visible = isEjectedActor
+          ? true
+          : !p.inVent && (p.alive || isLocal || (localPlayer && !localPlayer.alive));
         entry.rig.setVisibleState(Boolean(visible));
-        entry.rig.setGhost(!p.alive);
+        entry.rig.setGhost(!p.alive && !isEjectedActor);
         entry.rig.setVisualScan(p.visualTaskTimer > 0 && p.alive, elapsed);
         const showShield = Boolean(
           p.shielded &&
@@ -1589,6 +1637,63 @@ export function WorldScene({
             (isLocal || localPlayer?.specialRole === 'kobiraj' || !localPlayer?.alive),
         );
         entry.rig.setShielded(showShield, elapsed);
+
+        if (isVotedEjectCutscene) {
+          if (isEjectedActor) {
+            if (ejectT < 0.45) {
+              // Crowd lifts suspect at Pukur Ghat edge before hurling
+              const lift = ejectT / 0.45;
+              entry.rig.root.position.set(
+                -38.4,
+                0.55 + lift * 0.7 + Math.sin(ejectT * 28) * 0.1,
+                Math.sin(ejectT * 24) * 0.18,
+              );
+              entry.rig.root.rotation.set(0, -Math.PI / 2, Math.sin(ejectT * 26) * 0.25);
+              entry.rig.animateWalk(0, 0, dt, elapsed, 0, 0.45, 2.0, 0);
+            } else if (ejectT < 1.65) {
+              // Parabolic tumbling toss from stone bank into Pukur water
+              const u = (ejectT - 0.45) / 1.2;
+              const px = THREE.MathUtils.lerp(-38.4, -45.8, u);
+              const py = 1.25 + 4.8 * Math.sin(u * Math.PI) - 1.2 * u;
+              entry.rig.root.position.set(px, py, Math.sin(u * Math.PI) * 0.35);
+              entry.rig.root.rotation.x += dt * 7.8;
+              entry.rig.root.rotation.z += dt * 5.2;
+              entry.rig.animateWalk(0, 0, dt, elapsed, 0, 0.65, 1.0, 0);
+            } else {
+              // Splash & comical bobbing in Pukur pond
+              const waterT = ejectT - 1.65;
+              entry.rig.root.position.set(
+                -45.8 + Math.sin(waterT * 1.4) * 0.15,
+                -0.38 + Math.sin(waterT * 4.5) * 0.12,
+                Math.cos(waterT * 1.2) * 0.18,
+              );
+              entry.rig.root.rotation.set(0.32 + Math.sin(waterT * 3) * 0.15, -Math.PI / 2, 0.25);
+              entry.rig.animateWalk(0, 0, dt, elapsed);
+            }
+          } else if (p.alive) {
+            // Cheering & hopping Moholla crowd lined up on eastern Pukur bank
+            const aliveCrowd = snap.players.filter(
+              (pl) => pl.alive && pl.id !== snap.ejection?.ejectedId,
+            );
+            const cIdx = Math.max(0, aliveCrowd.findIndex((pl) => pl.id === p.id));
+            const row = cIdx % 5;
+            const col = Math.floor(cIdx / 5);
+            const bankX = -37.1 + col * 1.35;
+            const bankZ = -3.8 + row * 1.9 + (col % 2) * 0.7;
+            const hop = Math.abs(Math.sin(elapsed * 9.5 + cIdx * 1.15)) * 0.52;
+            entry.rig.root.position.set(bankX, 0, bankZ);
+            entry.rig.root.rotation.set(0, -Math.PI / 2 + Math.sin(elapsed * 4 + cIdx) * 0.14, 0);
+            entry.rig.animateWalk(0, 0, dt, elapsed, 0, hop + 0.05, 1.8, 0);
+          }
+          entry.prevX = entry.rig.root.position.x;
+          entry.prevZ = entry.rig.root.position.z;
+          continue;
+        }
+
+        // Reset any cutscene tilt when back to normal gameplay
+        entry.rig.root.position.y = 0;
+        entry.rig.root.rotation.x = 0;
+        entry.rig.root.rotation.z = 0;
 
         if (isLocal) {
           entry.targetX = localPosX;
@@ -1725,6 +1830,13 @@ export function WorldScene({
       posAttr.needsUpdate = true;
 
       const curPhase = phaseRef.current;
+      if (curPhase !== lastObservedPhase) {
+        if (curPhase === 'ejecting') {
+          ejectionStartAt = elapsed;
+          ejectionSplashFired = false;
+        }
+        lastObservedPhase = curPhase;
+      }
       const snap = snapshotRef.current;
 
       const showTitleActors = curPhase === 'title';
@@ -2034,32 +2146,78 @@ export function WorldScene({
           sabotageBeacon.visible = false;
         }
 
-        const horizDist = camDist * Math.cos(camPitch);
-        const skyLift = camPitch < 0.08 ? (0.08 - camPitch) * 9.5 : 0;
-        const jumpCamY = localPosY * 0.42;
-        _desiredLook.set(localPosX, 1.32 + jumpCamY + skyLift, localPosZ);
-        _desiredCamPos.set(
-          localPosX + Math.sin(camYaw) * horizDist,
-          1.32 + jumpCamY + camDist * Math.sin(camPitch),
-          localPosZ + Math.cos(camYaw) * horizDist,
-        );
+        const inPukurCutscene =
+          curPhase === 'ejecting' &&
+          snap.ejection?.reason === 'voted' &&
+          Boolean(snap.ejection.ejectedId);
 
-        _rayOrigin.set(localPosX, 1.32 + jumpCamY, localPosZ);
-        _rayDir.subVectors(_desiredCamPos, _rayOrigin);
-        const maxCamDist = _rayDir.length();
-        _rayDir.normalize();
-        _raycaster.set(_rayOrigin, _rayDir);
-        _raycaster.far = maxCamDist;
-        const hits = _raycaster.intersectObjects(wallMeshes, false);
-        if (hits.length > 0 && hits[0].distance < maxCamDist) {
-          const pullDist = Math.max(2.2, hits[0].distance - 0.45);
-          _desiredCamPos.copy(_rayOrigin).addScaledVector(_rayDir, pullDist);
+        if (inPukurCutscene) {
+          const ejectT = Math.max(0, elapsed - ejectionStartAt);
+          if (ejectT >= 1.65) {
+            if (!ejectionSplashFired) {
+              ejectionSplashFired = true;
+              trauma = Math.min(1, trauma + 0.55);
+            }
+            const spT = Math.min(1.6, ejectT - 1.65);
+            const ringScale = 0.8 + spT * 3.8;
+            splashRing.visible = spT < 1.5;
+            splashRing.scale.set(ringScale, ringScale, 1);
+            splashRingMat.opacity = Math.max(0, 0.92 * (1 - spT / 1.5));
+
+            const showDrops = spT < 1.25;
+            splashDropletMat.opacity = Math.max(0, 0.95 * (1 - spT / 1.25));
+            for (const d of splashDroplets) {
+              d.mesh.visible = showDrops;
+              if (showDrops) {
+                const du = spT / 1.25;
+                d.mesh.position.set(
+                  -45.8 + Math.cos(d.angle) * d.speed * du * 2.2,
+                  0.12 + 4 * d.peak * du * (1 - du),
+                  Math.sin(d.angle) * d.speed * du * 2.2,
+                );
+              }
+            }
+          } else {
+            splashRing.visible = false;
+            for (const d of splashDroplets) d.mesh.visible = false;
+          }
+
+          // Dramatic cinematic side-angle overlooking Pukur Ghat crowd & pond impact
+          _desiredCamPos.set(-31.2, 6.2, 9.8);
+          _desiredLook.set(-41.8, 1.35, 0);
+          camera.position.lerp(_desiredCamPos, Math.min(1, dt * 6));
+          camera.lookAt(_desiredLook);
+        } else {
+          splashRing.visible = false;
+          for (const d of splashDroplets) d.mesh.visible = false;
+
+          const horizDist = camDist * Math.cos(camPitch);
+          const skyLift = camPitch < 0.08 ? (0.08 - camPitch) * 9.5 : 0;
+          const jumpCamY = localPosY * 0.42;
+          _desiredLook.set(localPosX, 1.32 + jumpCamY + skyLift, localPosZ);
+          _desiredCamPos.set(
+            localPosX + Math.sin(camYaw) * horizDist,
+            1.32 + jumpCamY + camDist * Math.sin(camPitch),
+            localPosZ + Math.cos(camYaw) * horizDist,
+          );
+
+          _rayOrigin.set(localPosX, 1.32 + jumpCamY, localPosZ);
+          _rayDir.subVectors(_desiredCamPos, _rayOrigin);
+          const maxCamDist = _rayDir.length();
+          _rayDir.normalize();
+          _raycaster.set(_rayOrigin, _rayDir);
+          _raycaster.far = maxCamDist;
+          const hits = _raycaster.intersectObjects(wallMeshes, false);
+          if (hits.length > 0 && hits[0].distance < maxCamDist) {
+            const pullDist = Math.max(2.2, hits[0].distance - 0.45);
+            _desiredCamPos.copy(_rayOrigin).addScaledVector(_rayDir, pullDist);
+          }
+          _desiredCamPos.y = Math.max(0.45, _desiredCamPos.y);
+
+          const camSmooth = 1 - Math.exp(-14 * dt);
+          camera.position.lerp(_desiredCamPos, camSmooth);
+          camera.lookAt(_desiredLook);
         }
-        _desiredCamPos.y = Math.max(0.45, _desiredCamPos.y);
-
-        const camSmooth = 1 - Math.exp(-14 * dt);
-        camera.position.lerp(_desiredCamPos, camSmooth);
-        camera.lookAt(_desiredLook);
 
         if (trauma > 0) {
           const shake = trauma * trauma * 0.16;
@@ -2114,6 +2272,10 @@ export function WorldScene({
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       footprintGeo.dispose();
       for (const slot of footprintPool) slot.mat.dispose();
+      splashRingGeo.dispose();
+      splashRingMat.dispose();
+      splashDropletGeo.dispose();
+      splashDropletMat.dispose();
       composer?.dispose();
       roadNormNS.dispose();
       roadRoughNS.dispose();

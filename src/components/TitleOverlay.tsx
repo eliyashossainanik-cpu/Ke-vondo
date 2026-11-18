@@ -8,6 +8,7 @@ import {
   type SpecialRole,
 } from '../shared/types';
 import { getLoadedCustomCount, subscribeMemePack } from '../audio/memePackStore';
+import { soundEngine } from '../audio/soundEngine';
 import { loadCareerStats } from '../game/statsStore';
 import {
   Users,
@@ -21,6 +22,8 @@ import {
   Trophy,
   Maximize2,
   Minimize2,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import {
   isFullscreenActive,
@@ -33,6 +36,7 @@ export interface TitleOverlayProps {
   playerColor: PlayerColorId;
   publicRooms: PublicRoomSummary[];
   errorMsg: string | null;
+  connecting?: boolean;
   soloPlayerCount: number;
   soloSettings: RoomSettings;
   onChangeName: (name: string) => void;
@@ -45,6 +49,7 @@ export interface TitleOverlayProps {
   onRefreshRooms: () => void;
   onOpenMemePack: () => void;
   onOpenGuide: () => void;
+  initialJoinCode?: string | null;
 }
 
 const SOLO_SPECIAL_OPTIONS: Array<{ value: SpecialRole | 'random'; label: string }> = [
@@ -52,7 +57,11 @@ const SOLO_SPECIAL_OPTIONS: Array<{ value: SpecialRole | 'random'; label: string
   { value: 'goyenda', label: 'CID Mofiz (Goyenda)' },
   { value: 'kobiraj', label: 'Tabiz Baba (Kobiraj)' },
   { value: 'mistri', label: 'Current Babu (Mistri)' },
+  { value: 'daroga', label: 'Para Daroga (Sheriff)' },
+  { value: 'neta', label: 'Moholla Neta (Mayor 2x)' },
+  { value: 'daktar', label: 'Para Daktar (Doctor)' },
   { value: 'bohurupi', label: 'Bohurupi Batpar (Shapeshifter)' },
+  { value: 'jharudar', label: 'Jharudar Batpar (Cleaner)' },
   { value: 'pagol', label: 'Pagla Baba (Jester Chaos)' },
 ];
 
@@ -61,6 +70,7 @@ export function TitleOverlay({
   playerColor,
   publicRooms,
   errorMsg,
+  connecting = false,
   soloPlayerCount,
   soloSettings,
   onChangeName,
@@ -73,16 +83,30 @@ export function TitleOverlay({
   onRefreshRooms,
   onOpenMemePack,
   onOpenGuide,
+  initialJoinCode,
 }: TitleOverlayProps) {
-  const [joinCode, setJoinCode] = useState('');
-  const [modeTab, setModeTab] = useState<'solo' | 'multi'>('solo');
+  const [joinCode, setJoinCode] = useState(() => (initialJoinCode ? initialJoinCode.toUpperCase() : ''));
+  const [modeTab, setModeTab] = useState<'solo' | 'multi'>(() => (initialJoinCode ? 'multi' : 'solo'));
   const [soloSpecial, setSoloSpecial] = useState<SpecialRole | 'random'>('random');
   const [showSoloSettings, setShowSoloSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(() => isFullscreenActive());
+  const [bgmEnabled, setBgmEnabled] = useState(() => soundEngine.isBgmEnabled());
   const [, setPackVer] = useState(0);
+
+  useEffect(() => {
+    if (initialJoinCode) {
+      setJoinCode(initialJoinCode.toUpperCase());
+      setModeTab('multi');
+      onRefreshRooms();
+    }
+  }, [initialJoinCode, onRefreshRooms]);
 
   useEffect(() => subscribeMemePack(() => setPackVer((v) => v + 1)), []);
   useEffect(() => subscribeFullscreenChange(setIsFullscreen), []);
+  useEffect(
+    () => soundEngine.subscribeBgmState(() => setBgmEnabled(soundEngine.isBgmEnabled())),
+    [],
+  );
   const customMemeCount = getLoadedCustomCount();
   const career = loadCareerStats();
 
@@ -98,8 +122,24 @@ export function TitleOverlay({
         paddingRight: 'env(safe-area-inset-right)',
       }}
     >
-      {/* Top-Right Quick Fullscreen Toggle */}
-      <div className="fixed top-3 right-3 sm:top-5 sm:right-5 z-30 pointer-events-auto">
+      {/* Top-Right Quick BGM & Fullscreen Toggles */}
+      <div className="fixed top-3 right-3 sm:top-5 sm:right-5 z-30 pointer-events-auto flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            soundEngine.toggleBgm();
+          }}
+          aria-label={bgmEnabled ? 'Turn Off Background Music' : 'Turn On Background Music'}
+          title="Background Music (frad - ditto)"
+          className={`px-3 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 shadow-lg ${
+            bgmEnabled
+              ? 'border-emerald-400/40 bg-slate-950/85 hover:bg-slate-900 text-emerald-200'
+              : 'border-white/15 bg-slate-950/85 hover:bg-slate-900 text-slate-400'
+          }`}
+        >
+          {bgmEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4 text-rose-400" />}
+          <span>{bgmEnabled ? 'BGM On' : 'BGM Off'}</span>
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -403,7 +443,7 @@ export function TitleOverlay({
                   onClick={() =>
                     onStartSolo(
                       'parabasi',
-                      soloSpecial !== 'random' && soloSpecial !== 'bohurupi'
+                      soloSpecial !== 'random' && soloSpecial !== 'bohurupi' && soloSpecial !== 'jharudar'
                         ? soloSpecial
                         : undefined,
                     )
@@ -417,7 +457,9 @@ export function TitleOverlay({
                   onClick={() =>
                     onStartSolo(
                       'vondo',
-                      soloSpecial === 'bohurupi' ? 'bohurupi' : undefined,
+                      soloSpecial === 'bohurupi' || soloSpecial === 'jharudar'
+                        ? soloSpecial
+                        : undefined,
                     )
                   }
                   className="flex-1 py-2 px-3 rounded-lg bg-rose-950/90 hover:bg-rose-900 border border-rose-500/30 text-rose-200 text-xs font-semibold transition-colors"
@@ -428,28 +470,39 @@ export function TitleOverlay({
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="flex items-center gap-2">
+              {initialJoinCode && (
+                <div className="px-3 py-2 rounded-lg bg-emerald-950/80 border border-emerald-400/40 text-xs text-emerald-200 font-semibold">
+                  Invite Link Ready — Room <span className="font-mono-tabular text-amber-300">{initialJoinCode.toUpperCase()}</span> prefilled! Enter your nickname and tap Join.
+                </div>
+              )}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <button
                   type="button"
+                  disabled={connecting}
                   onClick={onCreateRoom}
-                  className="flex-1 py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-sm flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
+                  className="py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-display font-bold text-sm flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
                 >
                   <Plus className="w-4 h-4" />
-                  Create Room
+                  {connecting ? 'Connecting...' : 'Create Room'}
                 </button>
                 <div className="flex items-center gap-1.5 flex-1">
                   <input
                     type="text"
                     maxLength={6}
                     aria-label="Room code"
-                    placeholder="CODE"
+                    placeholder="ROOM CODE"
                     value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                    className="w-24 px-3 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-mono-tabular uppercase focus:outline-none focus:border-amber-400"
+                    onChange={(e) => setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && joinCode.trim().length >= 3 && !connecting) {
+                        onJoinRoom(joinCode.trim());
+                      }
+                    }}
+                    className="flex-1 min-w-0 px-3 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-mono-tabular uppercase tracking-widest focus:outline-none focus:border-amber-400"
                   />
                   <button
                     type="button"
-                    disabled={joinCode.trim().length < 3}
+                    disabled={connecting || joinCode.trim().length < 3}
                     onClick={() => onJoinRoom(joinCode.trim())}
                     className="px-4 py-3 rounded-xl bg-amber-400 disabled:opacity-40 hover:bg-amber-300 text-slate-950 font-bold text-sm transition-colors whitespace-nowrap"
                   >
@@ -457,6 +510,9 @@ export function TitleOverlay({
                   </button>
                 </div>
               </div>
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Normal game er moto <strong className="text-slate-200">Create Room</strong> chap diye code nao, ba bondhur deya <strong className="text-amber-300">Room Code</strong> likhe Join koro!
+              </p>
 
               <div className="pt-2 border-t border-slate-800">
                 <div className="flex items-center justify-between mb-2">
@@ -472,7 +528,7 @@ export function TitleOverlay({
                   </button>
                 </div>
                 {publicRooms.length === 0 ? (
-                  <p className="text-xs text-slate-400 py-2">No open rooms yet. Create one and share the 4-letter code!</p>
+                  <p className="text-xs text-slate-400 py-1">Create a room and share your Room Code with friends!</p>
                 ) : (
                   <div className="space-y-1.5 max-h-28 overflow-y-auto">
                     {publicRooms.map((r) => (

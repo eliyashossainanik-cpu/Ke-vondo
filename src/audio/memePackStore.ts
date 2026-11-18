@@ -1,3 +1,5 @@
+import { getApiUrl } from '../config/serverUrl';
+
 export type QuickMemeId =
   | 'vine_boom'
   | 'bonk'
@@ -13,8 +15,12 @@ export type EventMemeId =
   | 'event_eject'
   | 'event_sabotage'
   | 'event_shield'
+  | 'event_daroga'
+  | 'event_clean'
+  | 'event_revive'
   | 'event_task'
   | 'event_vent'
+  | 'event_jump'
   | 'event_win'
   | 'event_loss';
 
@@ -124,6 +130,27 @@ export const MEME_SLOTS: MemeSlotMeta[] = [
     keywords: ['shield', 'tabiz', 'save', 'block'],
   },
   {
+    id: 'event_daroga',
+    category: 'event',
+    defaultLabel: 'Daroga Arrest Shot',
+    banglaHint: 'Auto-plays when Para Daroga fires at a suspect',
+    keywords: ['daroga', 'police', 'sheriff', 'gun', 'shot'],
+  },
+  {
+    id: 'event_clean',
+    category: 'event',
+    defaultLabel: 'Jharudar Body Clean',
+    banglaHint: 'Auto-plays when Jharudar sweeps a fallen body away',
+    keywords: ['clean', 'sweep', 'jharudar', 'janitor'],
+  },
+  {
+    id: 'event_revive',
+    category: 'event',
+    defaultLabel: 'Daktar Saline Revive',
+    banglaHint: 'Auto-plays when Para Daktar revives a fallen neighbor',
+    keywords: ['revive', 'daktar', 'doctor', 'saline', 'heal'],
+  },
+  {
     id: 'event_task',
     category: 'event',
     defaultLabel: 'Kaaj Complete',
@@ -136,6 +163,13 @@ export const MEME_SLOTS: MemeSlotMeta[] = [
     defaultLabel: 'Dren e Dhuka (Vent)',
     banglaHint: 'Auto-plays when hopping into a drain vent',
     keywords: ['vent', 'dren', 'drain'],
+  },
+  {
+    id: 'event_jump',
+    category: 'event',
+    defaultLabel: 'Moholla Jump SFX',
+    banglaHint: 'Optional custom sound when pressing Jump [Space / Jump Btn]',
+    keywords: ['jump', 'boing', 'laf'],
   },
   {
     id: 'event_win',
@@ -240,39 +274,136 @@ function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
+export interface ServerMemeEntry {
+  slotId: MemeSlotId;
+  fileName: string;
+  mimeType: string;
+  customLabel?: string;
+  updatedAt: number;
+  hasFile: boolean;
+}
+
+export interface ServerMemeManifestResponse {
+  requiresPin: boolean;
+  clips: Record<string, ServerMemeEntry>;
+}
+
+const serverClipSet = new Set<MemeSlotId>();
+let serverRequiresPin = false;
+
+export function isServerClip(slotId: MemeSlotId): boolean {
+  return serverClipSet.has(slotId);
+}
+
+export function getServerClipCount(): number {
+  return serverClipSet.size;
+}
+
+export function doesServerRequirePin(): boolean {
+  return serverRequiresPin;
+}
+
+export async function syncServerMemePack(): Promise<void> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') return;
+  try {
+    const res = await fetch(getApiUrl('/api/memes'), { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = (await res.json()) as ServerMemeManifestResponse;
+    serverRequiresPin = Boolean(data.requiresPin);
+    const clips = data.clips ?? {};
+
+    const incomingServerIds = new Set<MemeSlotId>();
+    for (const [slotKey, entry] of Object.entries(clips)) {
+      const slotId = slotKey as MemeSlotId;
+      if (!MEME_SLOTS.some((s) => s.id === slotId)) continue;
+      if (entry.hasFile) {
+        incomingServerIds.add(slotId);
+        const curMeta = metaMap.get(slotId);
+        const needsDownload =
+          !rawBufferMap.has(slotId) || !curMeta || curMeta.updatedAt < entry.updatedAt;
+        if (needsDownload) {
+          const audioRes = await fetch(
+            getApiUrl(`/api/memes/file/${encodeURIComponent(slotId)}?t=${entry.updatedAt}`),
+            {
+              cache: 'no-store',
+            },
+          );
+          if (audioRes.ok) {
+            const buf = await audioRes.arrayBuffer();
+            rawBufferMap.set(slotId, buf);
+            metaMap.set(slotId, {
+              fileName: entry.fileName,
+              mimeType: entry.mimeType || 'audio/mpeg',
+              customLabel: entry.customLabel,
+              updatedAt: entry.updatedAt,
+            });
+          }
+        } else if (curMeta && entry.customLabel !== undefined && curMeta.customLabel !== entry.customLabel) {
+          metaMap.set(slotId, { ...curMeta, customLabel: entry.customLabel });
+        }
+      } else if (entry.customLabel) {
+        const curMeta = metaMap.get(slotId);
+        metaMap.set(slotId, {
+          fileName: curMeta?.fileName ?? '',
+          mimeType: curMeta?.mimeType ?? '',
+          customLabel: entry.customLabel,
+          updatedAt: entry.updatedAt,
+        });
+      }
+    }
+
+    // Remove stale server clips that were deleted on the server
+    for (const prevServerSlot of Array.from(serverClipSet)) {
+      if (!incomingServerIds.has(prevServerSlot)) {
+        rawBufferMap.delete(prevServerSlot);
+        metaMap.delete(prevServerSlot);
+      }
+    }
+    serverClipSet.clear();
+    for (const id of incomingServerIds) serverClipSet.add(id);
+
+    saveMetaToLocalStorage();
+    notifyListeners();
+  } catch {
+    // Offline or standalone fallback cleanly continues using local IndexedDB
+  }
+}
+
 export async function initMemePackStore(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     const db = await openDb();
-    if (!db) return;
-    await new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(STORE_NAME, 'readonly');
-        const store = tx.objectStore(STORE_NAME);
-        const req = store.getAll();
-        req.onsuccess = () => {
-          const rows = (req.result as StoredClipRecord[]) ?? [];
-          for (const r of rows) {
-            if (r?.slotId && r.buffer instanceof ArrayBuffer) {
-              rawBufferMap.set(r.slotId, r.buffer);
-              const existingMeta = metaMap.get(r.slotId);
-              metaMap.set(r.slotId, {
-                fileName: r.fileName,
-                mimeType: r.mimeType,
-                customLabel: existingMeta?.customLabel,
-                updatedAt: r.updatedAt,
-              });
+    if (db) {
+      await new Promise<void>((resolve) => {
+        try {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.getAll();
+          req.onsuccess = () => {
+            const rows = (req.result as StoredClipRecord[]) ?? [];
+            for (const r of rows) {
+              if (r?.slotId && r.buffer instanceof ArrayBuffer) {
+                rawBufferMap.set(r.slotId, r.buffer);
+                const existingMeta = metaMap.get(r.slotId);
+                metaMap.set(r.slotId, {
+                  fileName: r.fileName,
+                  mimeType: r.mimeType,
+                  customLabel: existingMeta?.customLabel,
+                  updatedAt: r.updatedAt,
+                });
+              }
             }
-          }
-          saveMetaToLocalStorage();
-          notifyListeners();
+            saveMetaToLocalStorage();
+            notifyListeners();
+            resolve();
+          };
+          req.onerror = () => resolve();
+        } catch {
           resolve();
-        };
-        req.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
+        }
+      });
+    }
+    await syncServerMemePack();
   })();
   return initPromise;
 }
@@ -507,4 +638,110 @@ export async function importMemePackJson(jsonText: string): Promise<number> {
     imported++;
   }
   return imported;
+}
+
+export async function uploadSlotAudioToServer(
+  slotId: MemeSlotId,
+  fileName: string,
+  mimeType: string,
+  buffer: ArrayBuffer,
+  customLabel?: string,
+  adminPin?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  await setSlotAudioClip(slotId, fileName, mimeType, buffer, customLabel);
+  try {
+    const res = await fetch(getApiUrl(`/api/admin/memes/${encodeURIComponent(slotId)}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(adminPin ? { 'x-admin-passcode': adminPin } : {}),
+      },
+      body: JSON.stringify({
+        fileName,
+        mimeType: mimeType || 'audio/mpeg',
+        customLabel: customLabel ?? metaMap.get(slotId)?.customLabel,
+        dataBase64: arrayBufferToBase64(buffer),
+      }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+      return { ok: false, error: errBody.error || `Server error (${res.status})` };
+    }
+    serverClipSet.add(slotId);
+    notifyListeners();
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Saved locally in browser; could not reach server.' };
+  }
+}
+
+export async function saveSlotLabelToServer(
+  slotId: MemeSlotId,
+  customLabel: string,
+  adminPin?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  setSlotCustomLabel(slotId, customLabel);
+  try {
+    const res = await fetch(getApiUrl(`/api/admin/memes/${encodeURIComponent(slotId)}`), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(adminPin ? { 'x-admin-passcode': adminPin } : {}),
+      },
+      body: JSON.stringify({
+        customLabel: customLabel.trim().slice(0, 24),
+        labelOnly: true,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+      return { ok: false, error: errBody.error || `Server error (${res.status})` };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Saved label locally.' };
+  }
+}
+
+export async function deleteSlotAudioFromServer(
+  slotId: MemeSlotId,
+  adminPin?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  await clearSlotClip(slotId);
+  serverClipSet.delete(slotId);
+  notifyListeners();
+  try {
+    const res = await fetch(getApiUrl(`/api/admin/memes/${encodeURIComponent(slotId)}`), {
+      method: 'DELETE',
+      headers: adminPin ? { 'x-admin-passcode': adminPin } : undefined,
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+      return { ok: false, error: errBody.error || `Server error (${res.status})` };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Removed locally.' };
+  }
+}
+
+export async function clearAllServerMemes(
+  adminPin?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  await clearAllClips();
+  serverClipSet.clear();
+  notifyListeners();
+  try {
+    const res = await fetch(getApiUrl('/api/admin/memes/clear'), {
+      method: 'POST',
+      headers: adminPin ? { 'x-admin-passcode': adminPin } : undefined,
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+      return { ok: false, error: errBody.error || `Server error (${res.status})` };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Cleared local clips.' };
+  }
 }

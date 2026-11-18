@@ -69,6 +69,11 @@ export default function App() {
   const [touchControlsEnabled, setTouchControlsEnabled] = useState<boolean>(() =>
     isTouchOrMobileDevice(),
   );
+  const [initialJoinCode] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const code = new URLSearchParams(window.location.search).get('room')?.trim().toUpperCase();
+    return code && code.length >= 3 ? code.slice(0, 6) : null;
+  });
 
   useEffect(() => {
     const onResize = () => {
@@ -125,7 +130,7 @@ export default function App() {
     return activeSnapshot.phase;
   })();
 
-  // Sync document.body.dataset.state for accessibility & automated checks
+  // Sync document.body.dataset.state & soften BGM during Shalish/cutscene phases
   useEffect(() => {
     const bodyState =
       derivedPhase === 'role_reveal' ||
@@ -135,6 +140,12 @@ export default function App() {
         ? 'playing'
         : derivedPhase;
     document.body.dataset.state = bodyState;
+    soundEngine.setBgmDucked(
+      derivedPhase === 'meeting' ||
+        derivedPhase === 'vote_results' ||
+        derivedPhase === 'ejecting' ||
+        derivedPhase === 'paused',
+    );
   }, [derivedPhase]);
 
   // Clear open station/task/map modals whenever gameplay is interrupted (meeting, ejection, gameover)
@@ -668,6 +679,7 @@ export default function App() {
           playerColor={playerColor}
           publicRooms={mp.publicRooms}
           errorMsg={mp.errorMsg}
+          connecting={mp.connecting}
           soloPlayerCount={soloPlayerCount}
           soloSettings={soloSettings}
           onChangeName={setPlayerName}
@@ -675,12 +687,14 @@ export default function App() {
           onChangeSoloPlayerCount={handleChangeSoloPlayerCount}
           onUpdateSoloSettings={handleUpdateSoloSettings}
           onStartSolo={(forceRole, forceSpecial) => {
+            soundEngine.startBgm();
             if (isTouchOrMobileDevice()) {
               void enterMobileFullscreenAndLandscape();
             }
             startSoloMatch(forceRole, forceSpecial);
           }}
           onCreateRoom={() => {
+            soundEngine.startBgm();
             if (isTouchOrMobileDevice()) {
               void enterMobileFullscreenAndLandscape();
             }
@@ -688,6 +702,7 @@ export default function App() {
             mp.createRoom(playerName, playerColor);
           }}
           onJoinRoom={(code) => {
+            soundEngine.startBgm();
             if (isTouchOrMobileDevice()) {
               void enterMobileFullscreenAndLandscape();
             }
@@ -697,6 +712,7 @@ export default function App() {
           onRefreshRooms={mp.refreshRooms}
           onOpenMemePack={() => setShowMemePack(true)}
           onOpenGuide={() => setShowGuide(true)}
+          initialJoinCode={initialJoinCode}
         />
       )}
 

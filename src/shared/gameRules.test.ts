@@ -9,12 +9,17 @@ import {
   computeTaskProgress,
   createPlayerTasks,
   evaluateMatchOutcome,
+  findNearestCleanableBody,
+  findNearestDarogaTarget,
   findNearestInspectableBody,
+  findNearestRevivableBody,
   findNearestShieldTarget,
   getColorShadeHint,
   getConnectedVents,
   getDirectionCompass,
+  getPlayerVoteWeight,
   inspectBodyClue,
+  resolveDarogaShot,
   resolveVentHopTarget,
   sanitizeSoloConfig,
   tallyVotes,
@@ -320,4 +325,78 @@ test('getDirectionCompass computes cardinal arrows and sanitizeSoloConfig clamps
   assert.equal(eightPlayer.playerCount, 8);
   assert.equal(eightPlayer.settings.vondoCount, 2);
   assert.equal(eightPlayer.settings.killCooldownSec, 10);
+});
+
+test('Daroga Sheriff shot hits Batpar cleanly and backfires on innocent Para-basi', () => {
+  const daroga = makePlayer({ id: 'd1', role: 'parabasi', specialRole: 'daroga', x: 0, z: 0 });
+  const vondo = makePlayer({ id: 'v1', role: 'vondo', x: 2.0, z: 0 });
+  const innocent = makePlayer({ id: 'c1', role: 'parabasi', x: 2.5, z: 0 });
+  const farVondo = makePlayer({ id: 'v2', role: 'vondo', x: 10.0, z: 0 });
+
+  assert.equal(findNearestDarogaTarget(daroga, [daroga, vondo, farVondo])?.id, 'v1');
+  assert.deepEqual(resolveDarogaShot(daroga, vondo), {
+    allowed: true,
+    hitVondo: true,
+    backfired: false,
+  });
+  assert.deepEqual(resolveDarogaShot(daroga, innocent), {
+    allowed: true,
+    hitVondo: false,
+    backfired: true,
+  });
+  assert.equal(resolveDarogaShot(daroga, farVondo).allowed, false);
+});
+
+test('Neta Mayor vote counts as 2x weight in tallyVotes', () => {
+  const neta = makePlayer({ id: 'n1', name: 'Neta', specialRole: 'neta', hasVoted: true, votedFor: 'v1' });
+  const p2 = makePlayer({ id: 'v1', name: 'Batpar', role: 'vondo', hasVoted: true, votedFor: 'n1' });
+  const p3 = makePlayer({ id: 'p3', name: 'Bhai', hasVoted: true, votedFor: 'n1' });
+  const p4 = makePlayer({ id: 'p4', name: 'Apa', hasVoted: true, votedFor: 'skip' });
+
+  assert.equal(getPlayerVoteWeight(neta), 2);
+  assert.equal(getPlayerVoteWeight(p2), 1);
+
+  // Neta gives 2 votes to v1 vs 2 votes (p2 + p3) to n1 -> tie!
+  const tiedByMayor = tallyVotes([neta, p2, p3, p4]);
+  assert.equal(tiedByMayor.reason, 'tie');
+
+  // If p3 joins Neta on v1 -> 3 votes vs 1 vote -> v1 ejected!
+  p3.votedFor = 'v1';
+  const ejectedByMayor = tallyVotes([neta, p2, p3, p4]);
+  assert.equal(ejectedByMayor.reason, 'voted');
+  assert.equal(ejectedByMayor.ejectedId, 'v1');
+});
+
+test('Jharudar body clean & Daktar Saline revive body range and limits', () => {
+  const body: BodyMarker = {
+    id: 'b_clean',
+    victimId: 'v1',
+    victimName: 'Lal',
+    color: 'lal',
+    x: 2,
+    z: 2,
+    reported: false,
+    killedAt: 1000,
+    killerColorHint: 'Light',
+    killerZoneHint: 'Adda',
+  };
+  const reportedBody: BodyMarker = { ...body, id: 'b_rep', reported: true };
+
+  const jharudar = makePlayer({ id: 'j1', role: 'vondo', specialRole: 'jharudar', x: 3.5, z: 2 });
+  assert.equal(findNearestCleanableBody(jharudar, [reportedBody, body])?.id, 'b_clean');
+
+  const daktarReady = makePlayer({ id: 'doc1', role: 'parabasi', specialRole: 'daktar', x: 2.5, z: 2, revivesLeft: 1 });
+  const daktarEmpty = makePlayer({ ...daktarReady, revivesLeft: 0 });
+  assert.equal(findNearestRevivableBody(daktarReady, [body])?.id, 'b_clean');
+  assert.equal(findNearestRevivableBody(daktarEmpty, [body]), null);
+
+  // 8-player 2-vondo assigns both bohurupi & jharudar and 6 crew/neutral specials
+  const roster8 = Array.from({ length: 8 }, (_, i) =>
+    makePlayer({ id: `r${i}`, role: i < 2 ? 'vondo' : 'parabasi' }),
+  );
+  const assigned8 = assignSpecialRoles(roster8, true, undefined, undefined, () => 0.25);
+  const vSpecials = new Set(assigned8.filter((p) => p.role === 'vondo').map((p) => p.specialRole));
+  assert.ok(vSpecials.has('bohurupi') && vSpecials.has('jharudar'));
+  const cSpecials = new Set(assigned8.filter((p) => p.role === 'parabasi').map((p) => p.specialRole));
+  assert.ok(cSpecials.has('daroga') && cSpecials.has('neta'));
 });

@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,9 +34,11 @@ import {
 import {
   BOHURUPI_COOLDOWN_SEC,
   BOHURUPI_DISGUISE_DURATION_SEC,
+  DAROGA_COOLDOWN_SEC,
   DEFAULT_ROOM_SETTINGS,
   DOOR_LOCK_COOLDOWN_SEC,
   DOOR_LOCK_DURATION_SEC,
+  JHARUDAR_CLEAN_COOLDOWN_SEC,
   KOBIRAJ_COOLDOWN_SEC,
   MISTRI_FIX_RANGE,
   MISTRI_VENT_COOLDOWN_SEC,
@@ -50,12 +53,16 @@ import {
   computeTaskProgress,
   createPlayerTasks,
   evaluateMatchOutcome,
+  findNearestCleanableBody,
+  findNearestDarogaTarget,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
+  findNearestRevivableBody,
   findNearestShieldTarget,
   getColorShadeHint,
   inspectBodyClue,
+  resolveDarogaShot,
   resolveVentHopTarget,
   tallyVotes,
 } from './src/shared/gameRules.ts';
@@ -63,7 +70,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const TICK_RATE_MS = 50; // 20Hz authoritative server tick
 const MAX_PLAYERS = 8;
 
@@ -301,14 +308,24 @@ function startMatch(room: RoomInternal): void {
     p.inVent = false;
     p.watchingCams = false;
     p.visualTaskTimer = 0;
-    p.abilityCooldown = p.specialRole === 'bohurupi' || p.specialRole === 'kobiraj' ? 6 : 0;
+    p.abilityCooldown =
+      p.specialRole === 'bohurupi' ||
+      p.specialRole === 'kobiraj' ||
+      p.specialRole === 'daroga' ||
+      p.specialRole === 'jharudar'
+        ? 6
+        : 0;
+    p.revivesLeft = p.specialRole === 'daktar' ? 1 : 0;
     p.shielded = false;
     p.disguiseColor = null;
     p.disguiseName = null;
     p.disguiseTimer = 0;
     p.hasVoted = false;
     p.votedFor = null;
-    p.emergencyMeetingsLeft = room.settings.emergencyMeetingsPerPlayer;
+    p.emergencyMeetingsLeft =
+      p.specialRole === 'neta'
+        ? room.settings.emergencyMeetingsPerPlayer + 1
+        : room.settings.emergencyMeetingsPerPlayer;
     p.killCooldownRemaining = p.role === 'vondo' ? Math.min(12, room.settings.killCooldownSec) : 0;
     p.tasks =
       p.role === 'parabasi' && p.specialRole !== 'pagol'
@@ -407,8 +424,33 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
     }
 
     if (room.phase === 'playing') {
+      if (p.specialRole === 'jharudar' && p.abilityCooldown <= 0.05) {
+        const cleanTarget = findNearestCleanableBody(p, room.bodies);
+        if (cleanTarget && Math.random() < 0.14) {
+          room.bodies = room.bodies.filter((b) => b.id !== cleanTarget.id);
+          p.abilityCooldown = JHARUDAR_CLEAN_COOLDOWN_SEC;
+          continue;
+        }
+      }
+
+      if (p.specialRole === 'daktar' && (p.revivesLeft ?? 0) > 0) {
+        const revBody = findNearestRevivableBody(p, room.bodies);
+        if (revBody && Math.random() < 0.16) {
+          const victim = room.players.get(revBody.victimId);
+          if (victim) {
+            room.bodies = room.bodies.filter((b) => b.id !== revBody.id);
+            victim.alive = true;
+            victim.x = revBody.x;
+            victim.z = revBody.z;
+            p.revivesLeft = 0;
+            broadcastRoom(room, { type: 'sfx:event', kind: 'revive' });
+            continue;
+          }
+        }
+      }
+
       const body = findNearestReportableBody(p, room.bodies);
-      if (body && (p.role === 'parabasi' || Math.random() < 0.04)) {
+      if (body && (p.role === 'parabasi' || (p.specialRole !== 'jharudar' && Math.random() < 0.04))) {
         body.reported = true;
         startMeeting(room, p, 'body', body.victimName);
         return;
@@ -651,7 +693,7 @@ setInterval(() => {
         }
         room.bodies = [];
         room.phase = 'ejecting';
-        room.phaseTimer = 3.0;
+        room.phaseTimer = 4.2;
         broadcastRoom(room, { type: 'sfx:event', kind: 'eject' });
         broadcastRoom(room);
       }
@@ -772,6 +814,7 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       tasks: [],
       killCooldownRemaining: 0,
       emergencyMeetingsLeft: room.settings.emergencyMeetingsPerPlayer,
+      revivesLeft: 0,
       votedFor: null,
       hasVoted: false,
     };
@@ -834,6 +877,7 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
         tasks: [],
         killCooldownRemaining: 0,
         emergencyMeetingsLeft: room.settings.emergencyMeetingsPerPlayer,
+        revivesLeft: 0,
         votedFor: null,
         hasVoted: false,
       });
@@ -972,6 +1016,119 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
           type: 'clue:result',
           title: 'Bohurupi Shapeshift',
           detail: `Disguised as ${chosen.name} for ${BOHURUPI_DISGUISE_DURATION_SEC}s!`,
+        });
+        broadcastRoom(room);
+        return;
+      }
+      if (player.specialRole === 'daroga') {
+        if (player.abilityCooldown > 0.05) return;
+        const target = msg.targetId
+          ? room.players.get(msg.targetId)
+          : findNearestDarogaTarget(player, Array.from(room.players.values()));
+        if (!target) {
+          sendToSocket(ws, {
+            type: 'clue:result',
+            title: 'Para Daroga',
+            detail: 'Move close to a suspect to make an Arrest Shot!',
+          });
+          return;
+        }
+        const res = resolveDarogaShot(player, target);
+        if (!res.allowed) return;
+        broadcastRoom(room, { type: 'sfx:event', kind: 'daroga' });
+        if (res.hitVondo) {
+          target.alive = false;
+          target.watchingCams = false;
+          player.abilityCooldown = DAROGA_COOLDOWN_SEC;
+          room.bodies.push({
+            id: `body_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            victimId: target.id,
+            victimName: target.name,
+            color: target.color,
+            x: target.x,
+            z: target.z,
+            reported: false,
+            killedAt: Date.now(),
+            killerColorHint: getColorShadeHint(player.color),
+            killerZoneHint: getZoneNameAt(target.x, target.z),
+          });
+          sendToSocket(ws, {
+            type: 'clue:result',
+            title: 'Daroga Bullseye!',
+            detail: `${target.name} CHILO ASLI BATPAR! Size kore diso!`,
+          });
+        } else {
+          player.alive = false;
+          player.watchingCams = false;
+          room.bodies.push({
+            id: `body_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            victimId: player.id,
+            victimName: player.name,
+            color: player.color,
+            x: player.x,
+            z: player.z,
+            reported: false,
+            killedAt: Date.now(),
+            killerColorHint: getColorShadeHint(player.color),
+            killerZoneHint: getZoneNameAt(player.x, player.z),
+          });
+          sendToSocket(ws, {
+            type: 'clue:result',
+            title: 'Daroga Misfire!',
+            detail: `${target.name} niraparadh Para-basi chilo! Ulto tomar job gelo!`,
+          });
+        }
+        if (!checkAndApplyWinCondition(room)) {
+          broadcastRoom(room);
+        }
+        return;
+      }
+      if (player.specialRole === 'daktar') {
+        if ((player.revivesLeft ?? 0) <= 0) return;
+        const body = findNearestRevivableBody(player, room.bodies);
+        if (!body) {
+          sendToSocket(ws, {
+            type: 'clue:result',
+            title: 'Para Daktar',
+            detail: 'Move near an unreported fallen body to apply Saline!',
+          });
+          return;
+        }
+        const victim = room.players.get(body.victimId);
+        if (!victim) return;
+        room.bodies = room.bodies.filter((b) => b.id !== body.id);
+        victim.alive = true;
+        victim.x = body.x;
+        victim.z = body.z;
+        player.revivesLeft = Math.max(0, (player.revivesLeft ?? 1) - 1);
+        player.abilityCooldown = 10;
+        broadcastRoom(room, { type: 'sfx:event', kind: 'revive' });
+        sendToSocket(ws, {
+          type: 'clue:result',
+          title: 'Saline Revive Success!',
+          detail: `${victim.name} ke Para Daktar bachaye tulsen!`,
+        });
+        broadcastRoom(room);
+        return;
+      }
+      if (player.specialRole === 'jharudar') {
+        if (player.abilityCooldown > 0.05) return;
+        const body = findNearestCleanableBody(player, room.bodies);
+        if (!body) {
+          sendToSocket(ws, {
+            type: 'clue:result',
+            title: 'Safai Batpar',
+            detail: 'Move near an unreported fallen body to clean it!',
+          });
+          return;
+        }
+        room.bodies = room.bodies.filter((b) => b.id !== body.id);
+        player.abilityCooldown = JHARUDAR_CLEAN_COOLDOWN_SEC;
+        sendToSocket(ws, { type: 'sfx:event', kind: 'clean' });
+        sendToSocket(ws, {
+          type: 'clue:result',
+          title: 'Lash Gayeb!',
+          detail: `Cleaned ${body.victimName}'s body — nobody can report it now!`,
         });
         broadcastRoom(room);
       }
@@ -1179,10 +1336,101 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
   }
 }
 
+const MEME_STORAGE_DIR = path.resolve(__dirname, 'server_memes');
+const MEME_MANIFEST_PATH = path.join(MEME_STORAGE_DIR, 'manifest.json');
+
+interface ServerMemeRecord {
+  slotId: string;
+  fileName: string;
+  mimeType: string;
+  customLabel?: string;
+  updatedAt: number;
+  hasFile: boolean;
+  storedFile?: string;
+}
+
+const VALID_MEME_SLOTS = new Set([
+  'vine_boom',
+  'bonk',
+  'sad_trombone',
+  'airhorn',
+  'dun_dun',
+  'chubani',
+  'event_kill',
+  'event_report',
+  'event_meeting',
+  'event_eject',
+  'event_sabotage',
+  'event_shield',
+  'event_daroga',
+  'event_clean',
+  'event_revive',
+  'event_task',
+  'event_vent',
+  'event_jump',
+  'event_win',
+  'event_loss',
+]);
+
+function ensureMemeStorageDir(): void {
+  if (!fs.existsSync(MEME_STORAGE_DIR)) {
+    fs.mkdirSync(MEME_STORAGE_DIR, { recursive: true });
+  }
+}
+
+function readMemeManifest(): Record<string, ServerMemeRecord> {
+  ensureMemeStorageDir();
+  if (!fs.existsSync(MEME_MANIFEST_PATH)) return {};
+  try {
+    const raw = fs.readFileSync(MEME_MANIFEST_PATH, 'utf-8');
+    return JSON.parse(raw) as Record<string, ServerMemeRecord>;
+  } catch {
+    return {};
+  }
+}
+
+function writeMemeManifest(manifest: Record<string, ServerMemeRecord>): void {
+  ensureMemeStorageDir();
+  fs.writeFileSync(MEME_MANIFEST_PATH, JSON.stringify(manifest, null, 2), 'utf-8');
+}
+
+function sanitizeSlotId(raw: string): string | null {
+  const clean = raw.trim();
+  return VALID_MEME_SLOTS.has(clean) ? clean : null;
+}
+
+function checkAdminPin(req: express.Request): boolean {
+  const expected = process.env.ADMIN_PASSCODE?.trim();
+  if (!expected) return true;
+  const provided = String(req.headers['x-admin-passcode'] ?? '').trim();
+  return provided === expected;
+}
+
 async function bootstrap(): Promise<void> {
+  ensureMemeStorageDir();
   const app = express();
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-passcode');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+  app.use(express.json({ limit: '8mb' }));
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
+
+  const broadcastAllSockets = (msg: ServerMessage) => {
+    const raw = JSON.stringify(msg);
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(raw);
+      }
+    }
+  };
 
   wss.on('connection', (ws) => {
     ws.on('message', (data) => {
@@ -1214,6 +1462,161 @@ async function bootstrap(): Promise<void> {
     res.json({ ok: true, activeRooms: rooms.size });
   });
 
+  // Server-Side Viral Bangla Meme Audio Endpoints
+  app.get('/api/memes', (_req, res) => {
+    const manifest = readMemeManifest();
+    const publicClips: Record<string, Omit<ServerMemeRecord, 'storedFile'>> = {};
+    for (const [k, v] of Object.entries(manifest)) {
+      publicClips[k] = {
+        slotId: v.slotId,
+        fileName: v.fileName,
+        mimeType: v.mimeType,
+        customLabel: v.customLabel,
+        updatedAt: v.updatedAt,
+        hasFile: Boolean(v.hasFile && v.storedFile && fs.existsSync(path.join(MEME_STORAGE_DIR, v.storedFile))),
+      };
+    }
+    res.json({
+      requiresPin: Boolean(process.env.ADMIN_PASSCODE?.trim()),
+      clips: publicClips,
+    });
+  });
+
+  app.get('/api/memes/file/:slotId', (req, res) => {
+    const slotId = sanitizeSlotId(req.params.slotId);
+    if (!slotId) {
+      res.status(404).json({ error: 'Unknown meme slot' });
+      return;
+    }
+    const manifest = readMemeManifest();
+    const entry = manifest[slotId];
+    if (!entry?.storedFile) {
+      res.status(404).json({ error: 'No audio uploaded for this slot' });
+      return;
+    }
+    const filePath = path.join(MEME_STORAGE_DIR, path.basename(entry.storedFile));
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'Audio file missing' });
+      return;
+    }
+    res.setHeader('Content-Type', entry.mimeType || 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(filePath);
+  });
+
+  app.post('/api/admin/memes/clear', (req, res) => {
+    if (!checkAdminPin(req)) {
+      res.status(401).json({ error: 'Invalid Admin Passcode PIN.' });
+      return;
+    }
+    const manifest = readMemeManifest();
+    for (const entry of Object.values(manifest)) {
+      if (entry.storedFile) {
+        const p = path.join(MEME_STORAGE_DIR, path.basename(entry.storedFile));
+        if (fs.existsSync(p)) {
+          fs.unlinkSync(p);
+        }
+      }
+    }
+    writeMemeManifest({});
+    broadcastAllSockets({ type: 'memes:updated', updatedAt: Date.now() });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/admin/memes/:slotId', (req, res) => {
+    if (!checkAdminPin(req)) {
+      res.status(401).json({ error: 'Invalid Admin Passcode PIN.' });
+      return;
+    }
+    const slotId = sanitizeSlotId(req.params.slotId);
+    if (!slotId) {
+      res.status(400).json({ error: 'Invalid meme slot ID.' });
+      return;
+    }
+    const body = (req.body ?? {}) as {
+      fileName?: string;
+      mimeType?: string;
+      customLabel?: string;
+      dataBase64?: string;
+      labelOnly?: boolean;
+    };
+
+    const manifest = readMemeManifest();
+    const prev = manifest[slotId];
+    const now = Date.now();
+
+    if (body.labelOnly) {
+      if (prev) {
+        prev.customLabel = body.customLabel ? String(body.customLabel).trim().slice(0, 24) : undefined;
+        prev.updatedAt = now;
+      } else {
+        manifest[slotId] = {
+          slotId,
+          fileName: '',
+          mimeType: '',
+          customLabel: body.customLabel ? String(body.customLabel).trim().slice(0, 24) : undefined,
+          updatedAt: now,
+          hasFile: false,
+        };
+      }
+      writeMemeManifest(manifest);
+      broadcastAllSockets({ type: 'memes:updated', updatedAt: now });
+      res.json({ ok: true });
+      return;
+    }
+
+    if (!body.dataBase64 || typeof body.dataBase64 !== 'string') {
+      res.status(400).json({ error: 'Missing audio payload.' });
+      return;
+    }
+    const audioBuf = Buffer.from(body.dataBase64, 'base64');
+    if (audioBuf.length === 0 || audioBuf.length > 6 * 1024 * 1024) {
+      res.status(400).json({ error: 'Audio file must be under 6 MB.' });
+      return;
+    }
+
+    const storedFile = `${slotId}.bin`;
+    fs.writeFileSync(path.join(MEME_STORAGE_DIR, storedFile), audioBuf);
+    manifest[slotId] = {
+      slotId,
+      fileName: String(body.fileName || `${slotId}.mp3`).slice(0, 80),
+      mimeType: String(body.mimeType || 'audio/mpeg').slice(0, 60),
+      customLabel: body.customLabel
+        ? String(body.customLabel).trim().slice(0, 24)
+        : prev?.customLabel,
+      updatedAt: now,
+      hasFile: true,
+      storedFile,
+    };
+    writeMemeManifest(manifest);
+    broadcastAllSockets({ type: 'memes:updated', updatedAt: now });
+    res.json({ ok: true, updatedAt: now });
+  });
+
+  app.delete('/api/admin/memes/:slotId', (req, res) => {
+    if (!checkAdminPin(req)) {
+      res.status(401).json({ error: 'Invalid Admin Passcode PIN.' });
+      return;
+    }
+    const slotId = sanitizeSlotId(req.params.slotId);
+    if (!slotId) {
+      res.status(400).json({ error: 'Invalid meme slot ID.' });
+      return;
+    }
+    const manifest = readMemeManifest();
+    const prev = manifest[slotId];
+    if (prev?.storedFile) {
+      const p = path.join(MEME_STORAGE_DIR, path.basename(prev.storedFile));
+      if (fs.existsSync(p)) {
+        fs.unlinkSync(p);
+      }
+    }
+    delete manifest[slotId];
+    writeMemeManifest(manifest);
+    broadcastAllSockets({ type: 'memes:updated', updatedAt: Date.now() });
+    res.json({ ok: true });
+  });
+
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -1223,6 +1626,10 @@ async function bootstrap(): Promise<void> {
     });
     app.use(vite.middlewares);
   } else {
+    const publicPath = path.resolve(__dirname, 'public');
+    if (fs.existsSync(publicPath)) {
+      app.use(express.static(publicPath));
+    }
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
