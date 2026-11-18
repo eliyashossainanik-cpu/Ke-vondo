@@ -24,7 +24,10 @@ import {
   Minimize2,
   Volume2,
   VolumeX,
+  Shuffle,
+  Pencil,
 } from 'lucide-react';
+import { pickAutoMultiplayerIdentity } from '../shared/banglaComedy';
 import {
   isFullscreenActive,
   subscribeFullscreenChange,
@@ -89,17 +92,32 @@ export function TitleOverlay({
   const [modeTab, setModeTab] = useState<'solo' | 'multi'>(() => (initialJoinCode ? 'multi' : 'solo'));
   const [soloSpecial, setSoloSpecial] = useState<SpecialRole | 'random'>('random');
   const [showSoloSettings, setShowSoloSettings] = useState(false);
+  const [editingMultiIdentity, setEditingMultiIdentity] = useState(false);
+  const [multiAutoApplied, setMultiAutoApplied] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(() => isFullscreenActive());
   const [bgmEnabled, setBgmEnabled] = useState(() => soundEngine.isBgmEnabled());
   const [, setPackVer] = useState(0);
+
+  const applyAutoIdentity = () => {
+    const auto = pickAutoMultiplayerIdentity([playerName], [playerColor]);
+    onChangeName(auto.name);
+    onChangeColor(auto.color);
+    setMultiAutoApplied(true);
+  };
 
   useEffect(() => {
     if (initialJoinCode) {
       setJoinCode(initialJoinCode.toUpperCase());
       setModeTab('multi');
+      if (!multiAutoApplied && playerName.trim() === 'Lal Mia') {
+        const auto = pickAutoMultiplayerIdentity([playerName], [playerColor]);
+        onChangeName(auto.name);
+        onChangeColor(auto.color);
+        setMultiAutoApplied(true);
+      }
       onRefreshRooms();
     }
-  }, [initialJoinCode, onRefreshRooms]);
+  }, [initialJoinCode, multiAutoApplied, onChangeColor, onChangeName, onRefreshRooms, playerColor, playerName]);
 
   useEffect(() => subscribeMemePack(() => setPackVer((v) => v + 1)), []);
   useEffect(() => subscribeFullscreenChange(setIsFullscreen), []);
@@ -162,12 +180,12 @@ export function TitleOverlay({
         }}
       />
 
-      <main className="relative z-10 flex flex-col justify-center flex-1 px-4 py-4 sm:px-12 max-w-xl pointer-events-auto">
+      <main className="relative z-10 flex flex-col justify-center [@media(max-height:540px)]:justify-start flex-1 px-4 py-4 [@media(max-height:540px)]:py-2 sm:px-12 [@media(max-height:540px)]:px-5 max-w-xl [@media(max-height:540px)]:max-w-lg pointer-events-auto">
         {/* Custom Inline SVG Emblem Lockup */}
-        <div className="mb-3 sm:mb-6">
+        <div className="mb-3 sm:mb-6 [@media(max-height:540px)]:mb-1.5">
           <svg
             viewBox="0 0 470 114"
-            className="w-full max-w-[300px] sm:max-w-[420px] h-auto"
+            className="w-full max-w-[300px] sm:max-w-[420px] [@media(max-height:540px)]:max-w-[235px] h-auto"
             role="img"
             aria-label="Ke Batpar? - Bangla 3D Social Deduction Comedy Game"
           >
@@ -205,7 +223,7 @@ export function TitleOverlay({
               কে বাটপার? · Moholla Comedy
             </text>
           </svg>
-          <p className="hidden sm:block mt-2 text-sm sm:text-base text-slate-300 leading-relaxed max-w-md">
+          <p className="hidden sm:block [@media(max-height:540px)]:hidden mt-2 text-sm sm:text-base text-slate-300 leading-relaxed max-w-md">
             Dudh-Cha khao, Loadshedding samlao, ar para theke asli Batpar ke khuje pukur e chubani dao!
           </p>
         </div>
@@ -213,56 +231,110 @@ export function TitleOverlay({
         {/* Character Setup Card */}
         <section
           aria-label="Player setup"
-          className="rounded-2xl p-4 sm:p-5 border border-white/12 shadow-2xl"
+          className="rounded-2xl p-4 sm:p-5 [@media(max-height:540px)]:p-3 border border-white/12 shadow-2xl"
           style={{ backgroundColor: 'rgba(15, 23, 42, 0.92)' }}
         >
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-            <div>
-              <label htmlFor="player-name-input" className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Para Nickname
-              </label>
-              <input
-                id="player-name-input"
-                type="text"
-                maxLength={16}
-                value={playerName}
-                onChange={(e) => onChangeName(e.target.value)}
-                placeholder="e.g. Lal Mia"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-medium focus:outline-none focus:border-amber-400"
-              />
-            </div>
-
-            <div>
-              <span className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Avatar Color · {selectedSpec.label}
-              </span>
-              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Choose avatar color">
-                {PLAYER_COLORS.map((c) => {
-                  const active = c.id === playerColor;
-                  return (
+          {modeTab === 'solo' || editingMultiIdentity ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 [@media(max-height:540px)]:gap-2.5 mb-4 [@media(max-height:540px)]:mb-2.5">
+              <div>
+                <div className="flex items-center justify-between mb-1.5 [@media(max-height:540px)]:mb-1">
+                  <label htmlFor="player-name-input" className="block text-xs font-semibold text-slate-300">
+                    Para Nickname
+                  </label>
+                  {modeTab === 'multi' && (
                     <button
-                      key={c.id}
                       type="button"
-                      onClick={() => onChangeColor(c.id)}
-                      aria-label={`Color ${c.label}`}
-                      aria-checked={active}
-                      role="radio"
-                      className={`w-7 h-7 rounded-full border-2 transition-transform ${
-                        active ? 'border-amber-300 scale-110' : 'border-white/25 hover:scale-105'
-                      }`}
-                      style={{ backgroundColor: c.hex }}
-                    />
-                  );
-                })}
+                      onClick={() => setEditingMultiIdentity(false)}
+                      className="text-[11px] font-semibold text-amber-300 hover:text-amber-200"
+                    >
+                      Done
+                    </button>
+                  )}
+                </div>
+                <input
+                  id="player-name-input"
+                  type="text"
+                  maxLength={16}
+                  value={playerName}
+                  onChange={(e) => onChangeName(e.target.value)}
+                  placeholder="e.g. Lal Mia"
+                  className="w-full px-3.5 py-2.5 [@media(max-height:540px)]:py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-medium focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <span className="block text-xs font-semibold text-slate-300 mb-1.5 [@media(max-height:540px)]:mb-1">
+                  Avatar Color · {selectedSpec.label}
+                </span>
+                <div className="flex flex-wrap gap-2 [@media(max-height:540px)]:gap-1.5" role="radiogroup" aria-label="Choose avatar color">
+                  {PLAYER_COLORS.map((c) => {
+                    const active = c.id === playerColor;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => onChangeColor(c.id)}
+                        aria-label={`Color ${c.label}`}
+                        aria-checked={active}
+                        role="radio"
+                        className={`w-7 h-7 [@media(max-height:540px)]:w-5 [@media(max-height:540px)]:h-5 rounded-full border-2 transition-transform ${
+                          active ? 'border-amber-300 scale-110' : 'border-white/25 hover:scale-105'
+                        }`}
+                        style={{ backgroundColor: c.hex }}
+                      />
+                    );
+                  })}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="mb-3 px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span
+                  className="w-8 h-8 rounded-full border-2 border-amber-300 shrink-0"
+                  style={{ backgroundColor: selectedSpec.hex }}
+                />
+                <div className="min-w-0">
+                  <div className="text-xs sm:text-sm font-bold text-white truncate">
+                    {playerName.trim() || 'Auto Moholla Hero'}
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">
+                    Color: {selectedSpec.label} · Role: Auto
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={applyAutoIdentity}
+                  aria-label="Shuffle auto name and color"
+                  title="Pick another funny name & color"
+                  className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold flex items-center gap-1"
+                >
+                  <Shuffle className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Auto</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingMultiIdentity(true)}
+                  aria-label="Edit nickname or color"
+                  className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Edit</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Mode Segmented Toggle */}
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 mb-4">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 mb-4 [@media(max-height:540px)]:mb-2.5">
             <button
               type="button"
-              onClick={() => setModeTab('solo')}
+              onClick={() => {
+                setModeTab('solo');
+                setEditingMultiIdentity(false);
+              }}
               className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                 modeTab === 'solo' ? 'bg-amber-400 text-slate-950' : 'text-slate-300 hover:text-white'
               }`}
@@ -273,6 +345,9 @@ export function TitleOverlay({
               type="button"
               onClick={() => {
                 setModeTab('multi');
+                if (!multiAutoApplied || playerName.trim() === 'Lal Mia') {
+                  applyAutoIdentity();
+                }
                 onRefreshRooms();
               }}
               className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
@@ -290,8 +365,8 @@ export function TitleOverlay({
           )}
 
           {modeTab === 'solo' ? (
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-800">
+            <div className="space-y-2.5 [@media(max-height:540px)]:space-y-1.5">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 [@media(max-height:540px)]:py-1.5 rounded-xl bg-slate-900 border border-slate-800">
                 <label
                   htmlFor="solo-role-select"
                   className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 shrink-0"
@@ -432,7 +507,7 @@ export function TitleOverlay({
                 onClick={() =>
                   onStartSolo(undefined, soloSpecial === 'random' ? undefined : soloSpecial)
                 }
-                className="w-full py-3.5 px-5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-display font-bold text-base flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                className="w-full py-3.5 [@media(max-height:540px)]:py-2.5 px-5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-display font-bold text-base [@media(max-height:540px)]:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
               >
                 <Play className="w-5 h-5 fill-current" />
                 Play Solo in Moholla
@@ -502,6 +577,7 @@ export function TitleOverlay({
                   />
                   <button
                     type="button"
+                    aria-label="Join with room code"
                     disabled={connecting || joinCode.trim().length < 3}
                     onClick={() => onJoinRoom(joinCode.trim())}
                     className="px-4 py-3 rounded-xl bg-amber-400 disabled:opacity-40 hover:bg-amber-300 text-slate-950 font-bold text-sm transition-colors whitespace-nowrap"

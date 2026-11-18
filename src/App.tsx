@@ -225,15 +225,15 @@ export default function App() {
     }
   }, [startSoloMatch]);
 
-  // Solo 20Hz simulation loop
+  // Solo 15Hz snapshot loop (3D scene interpolates & renders at native 60fps)
   useEffect(() => {
     if (mode !== 'solo') return;
     const timer = window.setInterval(() => {
       const engine = soloEngineRef.current;
       if (!engine || paused) return;
-      engine.step(0.05);
+      engine.step(0.066);
       setSoloSnapshot(engine.getSnapshot());
-    }, 50);
+    }, 66);
     return () => clearInterval(timer);
   }, [mode, paused]);
 

@@ -66,6 +66,7 @@ import {
   resolveVentHopTarget,
   tallyVotes,
 } from './src/shared/gameRules.ts';
+import { resolveUniqueMultiplayerIdentity } from './src/shared/banglaComedy.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -784,15 +785,18 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
     }
 
     const playerId = `pl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    const color = pickAvailableColor(room, msg.color);
     const sp = SPAWN_RING[room.players.size % SPAWN_RING.length];
-    const cleanName = msg.name.trim().slice(0, 16) || 'Babu Bhai';
+    const resolvedIdentity = resolveUniqueMultiplayerIdentity(
+      msg.name,
+      msg.color,
+      Array.from(room.players.values()),
+    );
     const isHost = room.players.size === 0;
 
     const player: PlayerState = {
       id: playerId,
-      name: cleanName,
-      color,
+      name: resolvedIdentity.name,
+      color: resolvedIdentity.color,
       x: sp.x,
       z: sp.z,
       vx: 0,

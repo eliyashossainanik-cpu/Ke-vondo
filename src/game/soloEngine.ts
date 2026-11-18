@@ -71,18 +71,19 @@ const BOT_ROSTER = [
 ];
 
 const BOT_CHAT_LINES = [
-  'Bhai ami toh Cha-er dokan e shingara khaitasilam, kasam!',
-  'Orey Batpar! Gap e niye kaure size kore dise re!',
-  'DESCO er fuse box er pashe ke jeno douraisilo, onek sus!',
+  'Bhai ami toh Cha-er dokan e shingara ar dudh-cha khaitasilam, kasam!',
+  'Orey Batpar! Gap e niye kaure size kore dise re mama!',
+  'DESCO er fuse box er pashe ke jeno douraisilo, onek sus lagche!',
   'Ami 100% innocent Para-basi, amar shoshur bari eidgah er pashe!',
   'Rickshaw garage e keu chilo? Dren er moddhe uki martasilo!',
   'Current gelo ar amader matha ghuray gelo bhai!',
-  'Ektu thik kore bolen toh, aajke ke Batpar?',
+  'Ektu thik kore bolen toh, aajke ke Batpar — chokh dekhei dhora jay!',
   'Ami Fuchka Chottor e tetul tok khaitasilam, shobai shakkhi!',
-  'Hero Saloon e chul katte gesilam, keu amake fashayen na!',
+  'Hero Saloon e chul katte gesilam, keu amake fashayen na pls!',
   'Para Cricket Math er dugout er piche keu chup kore chilo!',
   'Dadu Pharmacy te Napa ante gesilam bhai, amar kache bill ache!',
-  'Biyer Bari Pandal er DJ sound e kichu shuni nai, Batpar okhane chilo!',
+  'Biyer Bari Pandal er Kacchi khaitasilam, Batpar okhane chilo naki?!',
+  'Bhai amar ping high chilo tai daray chilam, ami Batpar na!',
 ];
 
 const PAGOL_CHAT_LINES = [

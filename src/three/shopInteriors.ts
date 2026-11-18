@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ProceduralTextureSet } from './proceduralTextures';
+import { optimizeStaticGroup } from './geometryBatch';
 
 export interface AnimatedShopRefs {
   barberPole: THREE.Group;
@@ -154,7 +155,7 @@ export function createAddaMonument(isSoftwareGl: boolean): THREE.Group {
     group.add(bGrp);
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createChaStallProps(
@@ -173,11 +174,10 @@ export function createChaStallProps(
   });
   const kettleMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.16, metalness: 0.92 });
   const brassMat = new THREE.MeshStandardMaterial({ color: '#f59e0b', roughness: 0.25, metalness: 0.85 });
-  const glassMat = new THREE.MeshPhysicalMaterial({
+  const glassMat = new THREE.MeshStandardMaterial({
     color: '#e0f2fe',
-    roughness: 0.08,
-    metalness: 0.05,
-    clearcoat: 1,
+    roughness: 0.1,
+    metalness: 0.15,
     transparent: true,
     opacity: 0.44,
   });
@@ -324,13 +324,13 @@ export function createChaStallProps(
   fridgeInner.position.set(0, 1.15, 0.58);
   fridgeGrp.add(fridgeBody, fridgeInner);
 
-  const bottleCols = ['#ef4444', '#22c55e', '#f59e0b', '#3b82f6'];
+  const bottleMats = ['#ef4444', '#22c55e', '#f59e0b', '#3b82f6'].map(
+    (col) => new THREE.MeshStandardMaterial({ color: col, roughness: 0.15 }),
+  );
+  const bottleGeo = new THREE.CylinderGeometry(0.075, 0.075, 0.32, 10);
   for (let shelf = 0; shelf < 3; shelf++) {
     for (let b = 0; b < 4; b++) {
-      const bot = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.075, 0.075, 0.32, 10),
-        new THREE.MeshStandardMaterial({ color: bottleCols[(shelf + b) % bottleCols.length], roughness: 0.15 }),
-      );
+      const bot = new THREE.Mesh(bottleGeo, bottleMats[(shelf + b) % bottleMats.length]);
       bot.position.set(-0.38 + b * 0.25, 0.62 + shelf * 0.52, 0.62);
       fridgeGrp.add(bot);
     }
@@ -382,7 +382,7 @@ export function createChaStallProps(
   sign.position.set(-35.5, 3.65, -33.7);
   group.add(sign);
 
-  return { group, ceilingFan };
+  return { group: optimizeStaticGroup(group, [ceilingFan]), ceilingFan };
 }
 
 function createCeilingFan(bladeHex: string): THREE.Group {
@@ -420,6 +420,12 @@ export function createBazarProps(textures: ProceduralTextureSet, isSoftwareGl: b
   rackFrame.castShadow = !isSoftwareGl;
   group.add(rackFrame);
 
+  const shelfHexes = ['#facc15', '#ef4444', '#22c55e', '#38bdf8', '#a855f7'];
+  const shelfJarMats = shelfHexes.map((col) => new THREE.MeshStandardMaterial({ color: col, roughness: 0.25 }));
+  const shelfBoxMats = shelfHexes.map((col) => new THREE.MeshStandardMaterial({ color: col, roughness: 0.45 }));
+  const oilBottleGeo = new THREE.CylinderGeometry(0.18, 0.2, 0.44, 14);
+  const groceryBoxGeo = new THREE.BoxGeometry(0.38, 0.36, 0.44);
+
   for (let tier = 0; tier < 3; tier++) {
     const sy = 0.65 + tier * 0.78;
     const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.28, 0.08, 9.5), crateMat);
@@ -428,17 +434,11 @@ export function createBazarProps(textures: ProceduralTextureSet, isSoftwareGl: b
 
     // Oil Bottles, Spice Jars & Grocery Boxes on each shelf
     for (let k = -4; k <= 4; k++) {
-      const colHex = ['#facc15', '#ef4444', '#22c55e', '#38bdf8', '#a855f7'][(Math.abs(k) + tier) % 5];
+      const matIdx = (Math.abs(k) + tier) % shelfHexes.length;
       const item =
         tier === 0
-          ? new THREE.Mesh(
-              new THREE.CylinderGeometry(0.18, 0.2, 0.44, 14),
-              new THREE.MeshStandardMaterial({ color: colHex, roughness: 0.25 }),
-            )
-          : new THREE.Mesh(
-              new THREE.BoxGeometry(0.38, 0.36, 0.44),
-              new THREE.MeshStandardMaterial({ color: colHex, roughness: 0.45 }),
-            );
+          ? new THREE.Mesh(oilBottleGeo, shelfJarMats[matIdx])
+          : new THREE.Mesh(groceryBoxGeo, shelfBoxMats[matIdx]);
       item.position.set(46.7, sy + 0.25, k * 1.0);
       group.add(item);
     }
@@ -578,7 +578,7 @@ export function createBazarProps(textures: ProceduralTextureSet, isSoftwareGl: b
     }
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createRickshawGarageProps(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -652,7 +652,7 @@ export function createRickshawGarageProps(textures: ProceduralTextureSet, isSoft
   sign.position.set(31.2, 3.65, -23.1);
   group.add(sign);
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createDescoTransformer(
@@ -748,7 +748,7 @@ export function createDescoTransformer(
   sign.position.set(0, 3.45, -2.0);
   group.add(sign);
 
-  return { group, exhaustFan };
+  return { group: optimizeStaticGroup(group, [exhaustFan]), exhaustFan };
 }
 
 export function createDishHub(
@@ -849,7 +849,7 @@ export function createDishHub(
   sign.position.set(35.0, 3.45, 39.2);
   group.add(sign);
 
-  return { group, serverLeds };
+  return { group: optimizeStaticGroup(group), serverLeds };
 }
 
 export function createFuchkaCartModel(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -858,11 +858,10 @@ export function createFuchkaCartModel(textures: ProceduralTextureSet, isSoftware
   const redFrame = new THREE.MeshStandardMaterial({ color: '#b91c1c', roughness: 0.36, metalness: 0.45 });
   const brassMat = new THREE.MeshStandardMaterial({ color: '#f59e0b', roughness: 0.2, metalness: 0.85 });
   const steelMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.2, metalness: 0.88 });
-  const glassMat = new THREE.MeshPhysicalMaterial({
+  const glassMat = new THREE.MeshStandardMaterial({
     color: '#e0f2fe',
-    roughness: 0.08,
-    metalness: 0.1,
-    clearcoat: 1,
+    roughness: 0.1,
+    metalness: 0.18,
     transparent: true,
     opacity: 0.52,
   });
@@ -1016,7 +1015,7 @@ export function createFuchkaCartModel(textures: ProceduralTextureSet, isSoftware
   }
 
   group.position.set(0, 0, -68.0);
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createSaloonProps(
@@ -1026,11 +1025,10 @@ export function createSaloonProps(
   const group = new THREE.Group();
   const counterMat = new THREE.MeshStandardMaterial({ color: '#831843', roughness: 0.38, metalness: 0.25 });
   const marbleMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.22 });
-  const mirrorMat = new THREE.MeshPhysicalMaterial({
+  const mirrorMat = new THREE.MeshStandardMaterial({
     color: '#bae6fd',
-    roughness: 0.06,
-    metalness: 0.9,
-    clearcoat: 1,
+    roughness: 0.08,
+    metalness: 0.92,
   });
   const chromeMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.16, metalness: 0.92 });
   const leatherMat = new THREE.MeshStandardMaterial({ color: '#be123c', roughness: 0.48 });
@@ -1156,7 +1154,11 @@ export function createSaloonProps(
   sign.position.set(-56.8, 3.7, -26.0);
   group.add(sign);
 
-  return { group, barberPole, ceilingFan };
+  return {
+    group: optimizeStaticGroup(group, [barberPole, ceilingFan]),
+    barberPole,
+    ceilingFan,
+  };
 }
 
 export function createCricketMathProps(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -1283,7 +1285,7 @@ export function createCricketMathProps(textures: ProceduralTextureSet, isSoftwar
   sign.position.set(73.1, 3.25, -26.0);
   group.add(sign);
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createPharmacyProps(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -1402,7 +1404,7 @@ export function createPharmacyProps(textures: ProceduralTextureSet, isSoftwareGl
   sign.position.set(-56.8, 3.7, 26.0);
   group.add(sign);
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createBiyerPandalProps(
@@ -1519,7 +1521,7 @@ export function createBiyerPandalProps(
   sign.position.set(59.6, 3.85, 26.0);
   group.add(sign);
 
-  return { group, wooferCones };
+  return { group: optimizeStaticGroup(group, wooferCones), wooferCones };
 }
 
 export function createPukurDetails(): { group: THREE.Group; boat: THREE.Group; flowers: THREE.Group[] } {
@@ -1620,7 +1622,7 @@ export function createPukurDetails(): { group: THREE.Group; boat: THREE.Group; f
   boat.rotation.y = 0.25;
   group.add(boat);
 
-  return { group, boat, flowers };
+  return { group: optimizeStaticGroup(group, [boat, ...flowers]), boat, flowers };
 }
 
 export function createEidgahGate(isSoftwareGl: boolean): THREE.Group {
@@ -1674,7 +1676,7 @@ export function createEidgahGate(isSoftwareGl: boolean): THREE.Group {
   }
 
   group.position.set(0, 0, -44.2);
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createWaterTowerModel(isSoftwareGl: boolean): THREE.Group {
@@ -1754,5 +1756,5 @@ export function createWaterTowerModel(isSoftwareGl: boolean): THREE.Group {
   group.add(catwalk, rail, tank, band, lid, pipe);
 
   group.position.set(0, 0, 39.0);
-  return group;
+  return optimizeStaticGroup(group);
 }

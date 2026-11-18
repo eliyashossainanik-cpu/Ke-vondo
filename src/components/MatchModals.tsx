@@ -6,6 +6,7 @@ import {
   type RoomSnapshot,
 } from '../shared/types';
 import { loadCareerStats } from '../game/statsStore';
+import { getChubaniTaunts, ROLE_COMEDY_TAGLINES } from '../shared/banglaComedy';
 import { RotateCcw, Home, Play, Trophy, Skull, Sparkles, Music2 } from 'lucide-react';
 
 export function RoleRevealModal({
@@ -71,6 +72,12 @@ export function RoleRevealModal({
               : `Moholla te ${fellowVondos.length === 1 ? '1 ta Batpar' : `${fellowVondos.length} ta Batpar`} ghurteche (${parabasiCount + fellowVondos.length} jon er moddhe). Kaaj sesh koro ba Shalish e chubani dao!`}
         </p>
 
+        <p className="text-xs sm:text-sm font-semibold text-amber-300/95 max-w-md mx-auto">
+          {isVondo && localPlayer.specialRole === 'none'
+            ? 'Ajke kare gap e nibi re Batpar?! Sabdhan, Pukur ready ache!'
+            : ROLE_COMEDY_TAGLINES[localPlayer.specialRole]}
+        </p>
+
         <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
           {(isVondo ? fellowVondos : [localPlayer]).map((p) => {
             const c = PLAYER_COLORS.find((col) => col.id === p.color) ?? PLAYER_COLORS[0];
@@ -106,6 +113,11 @@ export function EjectionModal({ ejection }: { ejection: EjectionInfo }) {
     : null;
 
   if (ejection.reason === 'voted' && ejection.ejectedName) {
+    const taunts = getChubaniTaunts(
+      ejection.ejectedName,
+      ejection.wasVondo,
+      ejection.wasSpecialRole === 'pagol',
+    );
     return (
       <div
         role="status"
@@ -116,13 +128,13 @@ export function EjectionModal({ ejection }: { ejection: EjectionInfo }) {
         <div className="max-w-2xl w-full mx-auto text-center space-y-2 pt-1 sm:pt-2">
           <div className="inline-flex flex-wrap items-center justify-center gap-2">
             <span className="px-3 py-1 rounded-xl bg-amber-400 text-slate-950 font-display font-extrabold text-xs sm:text-sm shadow-lg">
-              1... 2... 3... CHUBANI!!
+              {taunts[0]}
             </span>
             <span className="px-2.5 py-1 rounded-xl bg-slate-900/90 border border-sky-400/50 text-sky-200 font-bold text-xs shadow-lg">
-              &ldquo;Batpari Chharbi?!&rdquo;
+              {taunts[1]}
             </span>
             <span className="px-2.5 py-1 rounded-xl bg-slate-900/90 border border-rose-400/50 text-rose-200 font-bold text-xs shadow-lg">
-              &ldquo;Pukur e Jaa!&rdquo;
+              {taunts[2]}
             </span>
           </div>
         </div>
@@ -192,10 +204,10 @@ export function EjectionModal({ ejection }: { ejection: EjectionInfo }) {
       <div className="max-w-lg w-full text-center space-y-4">
         <h2 className="font-display text-3xl font-extrabold text-white">
           {ejection.reason === 'tie'
-            ? 'Vote Tai Hoye Gese — Keu Pukur e Jabe Na!'
-            : 'Shalish Skip — Keu Chubani Khay Nai!'}
+            ? 'Vote Tai! Pukur er Mach Ajke Uposh Thaklo!'
+            : 'Shobai Skip Marlo — Batpar Cha Khaitese!'}
         </h2>
-        <p className="text-sm text-slate-300">Asli Batpar ekhono mohollay ghurtese!</p>
+        <p className="text-sm text-slate-300">Asli Batpar ekhono mohollay ghurtese ar hashtease!</p>
         {ejection.confirmEjects && (
           <p className="text-xs font-mono-tabular text-amber-300">
             Batpars remaining in Moholla: {ejection.remainingVondos}
@@ -297,11 +309,11 @@ export function OutcomeModal({
   const career = loadCareerStats();
 
   const reasonText: Record<MatchOutcome['reason'], string> = {
-    tasks_completed: 'Mohollar shob kaaj time moto sesh hoise!',
-    vondos_ejected: 'Shob Batpar dhora kheye Pukur e chubani khaise!',
-    vondos_outnumber: 'Batpar ra pura Moholla dokhol kore nise!',
-    sabotage_timeout: 'Loadshedding / Wi-Fi thik kora hoy nai — puro para andhokar!',
-    jester_ejected: `${outcome.winnerPlayerName ?? 'Pagla Baba'} pura Moholla ke ullu banay chubani khaise!`,
+    tasks_completed: 'Mohollar shob kaaj shesh — ajke shobar jonne Biryani party!',
+    vondos_ejected: 'Shob Batpar dhora kheye Pukur e chubani khaise! Batpari khotom!',
+    vondos_outnumber: 'Batpar ra pura Moholla dokhol kore nise — Cha-er dokan o bondho!',
+    sabotage_timeout: 'Loadshedding / Wi-Fi thik hoy nai — TikTok ar Charge dui-i sesh!',
+    jester_ejected: `${outcome.winnerPlayerName ?? 'Pagla Baba'} shobai ke ullu banay cup niye gelo!`,
   };
 
   return (

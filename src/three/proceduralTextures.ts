@@ -201,8 +201,11 @@ function makePosterTexture(
   return tex;
 }
 
-export function createProceduralTextures(renderer: THREE.WebGLRenderer): ProceduralTextureSet {
-  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+export function createProceduralTextures(
+  renderer: THREE.WebGLRenderer,
+  maxAnisotropyCap = 8,
+): ProceduralTextureSet {
+  const maxAniso = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy(), maxAnisotropyCap));
 
   // 1. High-Detail Stone Cobble Albedo + Tangent Normal Map
   const cobbleCanvas = document.createElement('canvas');

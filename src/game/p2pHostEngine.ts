@@ -59,6 +59,7 @@ import {
   resolveVentHopTarget,
   tallyVotes,
 } from '../shared/gameRules';
+import { resolveUniqueMultiplayerIdentity } from '../shared/banglaComedy';
 
 const MAX_PLAYERS = 8;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -74,15 +75,17 @@ const BOT_NAMES = [
 ];
 
 const BOT_BANTER = [
-  'Bhai ami Cha-er dokan e dudh-cha chini chara khachilam!',
-  'Onek sus lagche kintu, aajke ke Batpar bolen?',
-  'Current gelo ar amar matha ghuray gelo re!',
-  'Ami DESCO te chora line check kortesilam, trust me!',
+  'Bhai ami Cha-er dokan e dudh-cha chini chara khachilam, kasam!',
+  'Onek sus lagche kintu, aajke ke Batpar bolen toh!',
+  'Current gelo ar amar matha ghuray gelo re mama!',
+  'Ami DESCO te chora line check kortesilam, trust me bhai!',
   'Rickshaw garage er pashe ke jeno gap e douraisilo!',
-  'Keu baje kotha bolben na, ami ekdom bhalo Para-basi!',
-  'Ami Fuchka Chottor e jhal fuchka khaitasilam kasam!',
-  'Hero Saloon e Hero-cut dite gesilam bhai!',
-  'Para Cricket Math e tape ball kheltesilam, keu sus bolben na!',
+  'Keu baje kotha bolben na, amar kache Tabiz o ache!',
+  'Ami Fuchka Chottor e jhal fuchka khaitasilam, ekdom innocent!',
+  'Hero Saloon e Hero-cut dite gesilam, keu fashayen na pls!',
+  'Para Cricket Math e tape ball kheltesilam, 100% clean!',
+  'Biyer Bari Pandal e Kacchi khaitasilam, Batpar okhane chilo naki?!',
+  'Bhai amar net slow chilo tai daray chilam, Batpar na!',
 ];
 
 const PAGOL_BANTER = [
@@ -267,13 +270,16 @@ export class P2PHostRoomEngine {
       ? 'pl_host'
       : `pl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const sp = SPAWN_RING[this.players.size % SPAWN_RING.length];
-    const cleanName = name.trim().slice(0, 16) || 'Babu Bhai';
-    const pickedColor = this.pickAvailableColor(color);
+    const resolvedIdentity = resolveUniqueMultiplayerIdentity(
+      name,
+      color,
+      Array.from(this.players.values()),
+    );
 
     const player: PlayerState = {
       id: playerId,
-      name: cleanName,
-      color: pickedColor,
+      name: resolvedIdentity.name,
+      color: resolvedIdentity.color,
       x: sp.x,
       z: sp.z,
       vx: 0,
@@ -794,12 +800,16 @@ export class P2PHostRoomEngine {
         if (!player.isHost || this.phase !== 'lobby' || this.players.size >= MAX_PLAYERS) return;
         const botId = `bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
         const sp = SPAWN_RING[this.players.size % SPAWN_RING.length];
-        const botName = BOT_NAMES[this.players.size % BOT_NAMES.length];
-        const botColor = this.pickAvailableColor();
+        const botCandidate = BOT_NAMES[this.players.size % BOT_NAMES.length];
+        const botIdentity = resolveUniqueMultiplayerIdentity(
+          botCandidate,
+          undefined,
+          Array.from(this.players.values()),
+        );
         this.players.set(botId, {
           id: botId,
-          name: botName,
-          color: botColor,
+          name: botIdentity.name,
+          color: botIdentity.color,
           x: sp.x,
           z: sp.z,
           vx: 0,

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { DoorSpec, PlayerColorSpec } from '../shared/types';
 import type { ProceduralTextureSet } from './proceduralTextures';
+import { optimizeStaticGroup } from './geometryBatch';
 
 export interface CharacterRig {
   root: THREE.Group;
@@ -73,6 +74,42 @@ function createNameTagSprite(name: string, accentHex: string): {
   return { sprite, canvas, tex };
 }
 
+const _charSharedGeo = {
+  leg: new THREE.CapsuleGeometry(0.155, 0.22, 8, 14),
+  foot: new THREE.CapsuleGeometry(0.11, 0.16, 8, 12),
+  torso: new THREE.CapsuleGeometry(0.45, 0.54, 12, 24),
+  arm: new THREE.CapsuleGeometry(0.11, 0.18, 8, 12),
+  belt: new THREE.TorusGeometry(0.43, 0.055, 10, 24),
+  visor: new THREE.CapsuleGeometry(0.23, 0.34, 10, 18),
+  sparkle: new THREE.SphereGeometry(0.05, 8, 8),
+  sparkleTiny: new THREE.SphereGeometry(0.026, 6, 6),
+  cheek: new THREE.SphereGeometry(0.065, 8, 8),
+  packBody: new THREE.CylinderGeometry(0.24, 0.24, 0.5, 14),
+  packLid: new THREE.CylinderGeometry(0.26, 0.26, 0.08, 14),
+  packStrap: new THREE.TorusGeometry(0.14, 0.025, 6, 12, Math.PI),
+  scanAura: new THREE.CylinderGeometry(0.76, 0.76, 0.14, 24, 1, true),
+  shieldAura: new THREE.TorusGeometry(0.84, 0.055, 8, 24),
+  shadowDisc: new THREE.CircleGeometry(0.68, 18),
+};
+
+const _charTrimMat = new THREE.MeshStandardMaterial({
+  color: '#fbbf24',
+  roughness: 0.22,
+  metalness: 0.68,
+});
+const _charShoeMat = new THREE.MeshStandardMaterial({
+  color: '#1e293b',
+  roughness: 0.36,
+  metalness: 0.2,
+});
+const _charTiffinMat = new THREE.MeshStandardMaterial({
+  color: '#cbd5e1',
+  roughness: 0.34,
+  metalness: 0.72,
+});
+const _charSparkleMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+const _charBlushMat = new THREE.MeshBasicMaterial({ color: '#fb7185', transparent: true, opacity: 0.75 });
+
 export function createCharacterRig(
   colorSpec: PlayerColorSpec,
   displayName: string,
@@ -83,49 +120,29 @@ export function createCharacterRig(
   const bodyGroup = new THREE.Group();
   root.add(bodyGroup);
 
-  const suitMat = new THREE.MeshPhysicalMaterial({
+  const suitMat = new THREE.MeshStandardMaterial({
     color: colorSpec.hex,
     roughness: 0.34,
-    metalness: 0.05,
-    sheen: 0.55,
-    sheenRoughness: 0.55,
-    sheenColor: new THREE.Color('#ffffff'),
+    metalness: 0.08,
   });
 
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: '#fbbf24',
-    roughness: 0.2,
-    metalness: 0.68,
-  });
+  const trimMat = _charTrimMat;
+  const shoeMat = _charShoeMat;
+  const tiffinMat = _charTiffinMat;
 
-  const shoeMat = new THREE.MeshPhysicalMaterial({
-    color: '#1e293b',
-    roughness: 0.45,
-    metalness: 0.12,
-    clearcoat: 0.35,
-  });
-
-  const tiffinMat = new THREE.MeshStandardMaterial({
-    color: '#cbd5e1',
-    roughness: 0.34,
-    metalness: 0.72,
-  });
-
-  const visorMat = new THREE.MeshPhysicalMaterial({
+  const visorMat = new THREE.MeshStandardMaterial({
     color: colorSpec.visorTint,
-    roughness: 0.1,
-    metalness: 0.1,
-    clearcoat: 0.85,
-    clearcoatRoughness: 0.1,
+    roughness: 0.08,
+    metalness: 0.24,
     emissive: colorSpec.visorTint,
-    emissiveIntensity: 0.05,
+    emissiveIntensity: 0.12,
   });
 
   const suitMaterials = [suitMat];
 
   // Articulated Chibi Legs & Rounded Shoes
-  const legGeo = new THREE.CapsuleGeometry(0.155, 0.22, 10, 18);
-  const footGeo = new THREE.CapsuleGeometry(0.11, 0.16, 10, 16);
+  const legGeo = _charSharedGeo.leg;
+  const footGeo = _charSharedGeo.foot;
 
   const leftLeg = new THREE.Group();
   leftLeg.position.set(-0.21, 0.5, 0);
@@ -150,55 +167,49 @@ export function createCharacterRig(
   bodyGroup.add(leftLeg, rightLeg);
 
   // Hi-Poly Plump Chibi Bean Torso
-  const torsoGeo = new THREE.CapsuleGeometry(0.45, 0.54, 18, 32);
-  const torsoMesh = new THREE.Mesh(torsoGeo, suitMat);
+  const torsoMesh = new THREE.Mesh(_charSharedGeo.torso, suitMat);
   torsoMesh.position.y = 1.05;
   torsoMesh.castShadow = !isSoftwareGl;
   torsoMesh.receiveShadow = true;
   bodyGroup.add(torsoMesh);
 
   // Cute Swinging Arms
-  const armGeo = new THREE.CapsuleGeometry(0.11, 0.18, 10, 16);
   const leftArm = new THREE.Group();
   leftArm.position.set(-0.48, 1.08, 0.04);
-  const leftArmMesh = new THREE.Mesh(armGeo, suitMat);
+  const leftArmMesh = new THREE.Mesh(_charSharedGeo.arm, suitMat);
   leftArmMesh.position.y = -0.1;
   leftArmMesh.rotation.z = 0.28;
   leftArm.add(leftArmMesh);
 
   const rightArm = new THREE.Group();
   rightArm.position.set(0.48, 1.08, 0.04);
-  const rightArmMesh = new THREE.Mesh(armGeo, suitMat);
+  const rightArmMesh = new THREE.Mesh(_charSharedGeo.arm, suitMat);
   rightArmMesh.position.y = -0.1;
   rightArmMesh.rotation.z = -0.28;
   rightArm.add(rightArmMesh);
   bodyGroup.add(leftArm, rightArm);
 
   // Deshi Waist Ring
-  const beltGeo = new THREE.TorusGeometry(0.43, 0.055, 12, 32);
-  const beltMesh = new THREE.Mesh(beltGeo, trimMat);
+  const beltMesh = new THREE.Mesh(_charSharedGeo.belt, trimMat);
   beltMesh.rotation.x = Math.PI / 2;
   beltMesh.position.y = 0.72;
   bodyGroup.add(beltMesh);
 
   // Hi-Poly Glossy Visor + Specular Sparkle + Rosy Cheeks
-  const visorGeo = new THREE.CapsuleGeometry(0.23, 0.34, 14, 24);
-  const visorMesh = new THREE.Mesh(visorGeo, visorMat);
+  const visorMesh = new THREE.Mesh(_charSharedGeo.visor, visorMat);
   visorMesh.rotation.z = Math.PI / 2;
   visorMesh.scale.set(0.86, 1.0, 0.65);
   visorMesh.position.set(0, 1.32, 0.34);
   bodyGroup.add(visorMesh);
 
-  const sparkleMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
-  const sparkle = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10), sparkleMat);
+  const sparkle = new THREE.Mesh(_charSharedGeo.sparkle, _charSparkleMat);
   sparkle.scale.set(1.6, 0.85, 0.6);
   sparkle.position.set(0.16, 1.39, 0.51);
-  const sparkleTiny = new THREE.Mesh(new THREE.SphereGeometry(0.026, 8, 8), sparkleMat);
+  const sparkleTiny = new THREE.Mesh(_charSharedGeo.sparkleTiny, _charSparkleMat);
   sparkleTiny.position.set(0.05, 1.41, 0.52);
   bodyGroup.add(sparkle, sparkleTiny);
 
-  const blushMat = new THREE.MeshBasicMaterial({ color: '#fb7185', transparent: true, opacity: 0.75 });
-  const cheekL = new THREE.Mesh(new THREE.SphereGeometry(0.065, 10, 10), blushMat);
+  const cheekL = new THREE.Mesh(_charSharedGeo.cheek, _charBlushMat);
   cheekL.scale.set(1.3, 0.75, 0.5);
   cheekL.position.set(-0.27, 1.12, 0.38);
   const cheekR = cheekL.clone();
@@ -208,10 +219,10 @@ export function createCharacterRig(
   // Steel Tiffin-Carrier Backpack
   const packGroup = new THREE.Group();
   packGroup.position.set(0, 1.04, -0.4);
-  const packBody = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.5, 18), tiffinMat);
-  const packLid = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.08, 18), trimMat);
+  const packBody = new THREE.Mesh(_charSharedGeo.packBody, tiffinMat);
+  const packLid = new THREE.Mesh(_charSharedGeo.packLid, trimMat);
   packLid.position.y = 0.27;
-  const packStrap = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.025, 8, 14, Math.PI), shoeMat);
+  const packStrap = new THREE.Mesh(_charSharedGeo.packStrap, shoeMat);
   packStrap.position.y = 0.31;
   packGroup.add(packBody, packLid, packStrap);
   bodyGroup.add(packGroup);
@@ -267,7 +278,7 @@ export function createCharacterRig(
 
   // Visual Task Med-Scan Aura
   const scanAura = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.76, 0.76, 0.14, 28, 1, true),
+    _charSharedGeo.scanAura,
     new THREE.MeshBasicMaterial({
       color: '#34d399',
       transparent: true,
@@ -281,7 +292,7 @@ export function createCharacterRig(
 
   // Kobiraj Tabiz Shield Aura
   const shieldAura = new THREE.Mesh(
-    new THREE.TorusGeometry(0.84, 0.055, 10, 32),
+    _charSharedGeo.shieldAura,
     new THREE.MeshBasicMaterial({
       color: '#fbbf24',
       transparent: true,
@@ -301,7 +312,7 @@ export function createCharacterRig(
     opacity: 0.48,
     depthWrite: false,
   });
-  const shadowMesh = new THREE.Mesh(new THREE.CircleGeometry(0.68, 24), shadowMat);
+  const shadowMesh = new THREE.Mesh(_charSharedGeo.shadowDisc, shadowMat);
   shadowMesh.rotation.x = -Math.PI / 2;
   shadowMesh.position.y = 0.018;
   root.add(shadowMesh);
@@ -822,7 +833,7 @@ export function createRickshawModel(textures: ProceduralTextureSet, isSoftwareGl
 
   group.add(fork, bar, headlamp, beam);
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createCngModel(isSoftwareGl: boolean): THREE.Group {
@@ -830,11 +841,10 @@ export function createCngModel(isSoftwareGl: boolean): THREE.Group {
   const greenBody = new THREE.MeshStandardMaterial({ color: '#15803d', roughness: 0.32, metalness: 0.38 });
   const canvasHood = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.85 });
   const yellowTrim = new THREE.MeshStandardMaterial({ color: '#facc15', roughness: 0.38 });
-  const glassMat = new THREE.MeshPhysicalMaterial({
+  const glassMat = new THREE.MeshStandardMaterial({
     color: '#bae6fd',
     roughness: 0.08,
-    metalness: 0.1,
-    clearcoat: 1,
+    metalness: 0.22,
     transparent: true,
     opacity: 0.72,
   });
@@ -930,7 +940,7 @@ export function createCngModel(isSoftwareGl: boolean): THREE.Group {
     group.add(wg);
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createChaStallProps(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -1180,7 +1190,7 @@ export function createPalmTree(isSoftwareGl: boolean): THREE.Group {
     }
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createKrishnachuraTree(isSoftwareGl: boolean): THREE.Group {
@@ -1247,7 +1257,7 @@ export function createKrishnachuraTree(isSoftwareGl: boolean): THREE.Group {
   centerBloom.position.set(0.25, 5.1, -0.15);
   group.add(centerCrown, centerBloom);
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createStreetLamp(): { group: THREE.Group; coneMesh: THREE.Mesh } {
@@ -1259,11 +1269,11 @@ export function createStreetLamp(): { group: THREE.Group; coneMesh: THREE.Mesh }
     emissiveIntensity: 2.1,
   });
 
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.34, 0.55, 18), poleMat);
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.34, 0.55, 14), poleMat);
   base.position.y = 0.275;
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 4.3, 16), poleMat);
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 4.3, 12), poleMat);
   pole.position.y = 2.35;
-  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.032, 10, 18), poleMat);
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.032, 8, 14), poleMat);
   collar.rotation.x = Math.PI / 2;
   collar.position.y = 4.32;
   const armCurve = new THREE.CatmullRomCurve3([
@@ -1271,25 +1281,26 @@ export function createStreetLamp(): { group: THREE.Group; coneMesh: THREE.Mesh }
     new THREE.Vector3(0.4, 4.6, 0),
     new THREE.Vector3(0.75, 4.35, 0),
   ]);
-  const arm = new THREE.Mesh(new THREE.TubeGeometry(armCurve, 10, 0.04, 8, false), poleMat);
-  const shade = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.16, 18), poleMat);
+  const arm = new THREE.Mesh(new THREE.TubeGeometry(armCurve, 8, 0.04, 6, false), poleMat);
+  const shade = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.16, 14), poleMat);
   shade.position.set(0.75, 4.32, 0);
-  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 16), bulbMat);
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 12), bulbMat);
   bulb.position.set(0.75, 4.2, 0);
 
   // Subtle Volumetric Light Cone beneath streetlamp
   const coneMat = new THREE.MeshBasicMaterial({
     color: '#fde68a',
     transparent: true,
-    opacity: 0.028,
+    opacity: 0.032,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const coneMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 2.85, 4.15, 20, 1, true), coneMat);
+  const coneMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 2.85, 4.15, 16, 1, true), coneMat);
   coneMesh.position.set(0.75, 2.1, 0);
 
   group.add(base, pole, collar, arm, shade, bulb, coneMesh);
+  optimizeStaticGroup(group, [coneMesh]);
   return { group, coneMesh };
 }
 
@@ -1299,18 +1310,18 @@ export function createUtilityPole(): THREE.Group {
   const steelMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.45, metalness: 0.7 });
   const insMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.25 });
 
-  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.2, 6.2, 12), concreteMat);
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.2, 6.2, 10), concreteMat);
   post.position.y = 3.1;
   const cross = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.1), steelMat);
   cross.position.y = 5.6;
   group.add(post, cross);
 
   for (const ix of [-0.62, 0, 0.62]) {
-    const ins = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.16, 10), insMat);
+    const ins = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.16, 8), insMat);
     ins.position.set(ix, 5.72, 0);
     group.add(ins);
   }
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createOverheadWires(spans: Array<[number, number, number, number]>): THREE.Group {
@@ -1325,11 +1336,11 @@ export function createOverheadWires(spans: Array<[number, number, number, number
         new THREE.Vector3(midX + off * 0.4, 4.55, midZ + off * 0.4),
         new THREE.Vector3(x2 + off * 0.4, 5.72, z2 + off * 0.4),
       ]);
-      const cable = new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.024, 5, false), wireMat);
+      const cable = new THREE.Mesh(new THREE.TubeGeometry(curve, 12, 0.024, 5, false), wireMat);
       group.add(cable);
     }
   }
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createDrainVent(): THREE.Group {
@@ -1346,7 +1357,7 @@ export function createDrainVent(): THREE.Group {
     slat.position.set(0, 0.095, i * 0.24);
     group.add(slat);
   }
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createPukurDetails(): { group: THREE.Group; boat: THREE.Group; flowers: THREE.Group[] } {
@@ -1624,7 +1635,7 @@ export function createAlleyProps(textures: ProceduralTextureSet, isSoftwareGl: b
     group.add(bin, rim);
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createPlanterPot(): THREE.Group {
@@ -1641,18 +1652,18 @@ export function createPlanterPot(): THREE.Group {
     new THREE.Vector2(0.36, 0.52),
     new THREE.Vector2(0.01, 0.44),
   ];
-  const pot = new THREE.Mesh(new THREE.LatheGeometry(potPts, 20), potMat);
-  const bush = new THREE.Mesh(new THREE.IcosahedronGeometry(0.46, 2), bushMat);
+  const pot = new THREE.Mesh(new THREE.LatheGeometry(potPts, 14), potMat);
+  const bush = new THREE.Mesh(new THREE.IcosahedronGeometry(0.46, 1), bushMat);
   bush.position.y = 0.68;
   group.add(pot, bush);
 
   for (let i = 0; i < 5; i++) {
     const a = (i / 5) * Math.PI * 2;
-    const fl = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 10), blossomMat);
+    const fl = new THREE.Mesh(new THREE.SphereGeometry(0.095, 8, 8), blossomMat);
     fl.position.set(Math.cos(a) * 0.36, 0.8 + (i % 2) * 0.1, Math.sin(a) * 0.36);
     group.add(fl);
   }
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createMoricbattiGarlands(): { group: THREE.Group; bulbMats: THREE.MeshBasicMaterial[] } {
@@ -1667,7 +1678,7 @@ export function createMoricbattiGarlands(): { group: THREE.Group; bulbMats: THRE
     [9.2, 9.2, -9.2, 9.2],
     [-9.2, 9.2, -9.2, -9.2],
   ];
-  const bulbGeo = new THREE.SphereGeometry(0.13, 12, 12);
+  const bulbGeo = new THREE.SphereGeometry(0.13, 8, 8);
 
   spans.forEach(([x1, z1, x2, z2], sIdx) => {
     const count = 11;
@@ -1686,11 +1697,11 @@ export function createMoricbattiGarlands(): { group: THREE.Group; bulbMats: THRE
       }
     }
     const curve = new THREE.CatmullRomCurve3(pts);
-    const wire = new THREE.Mesh(new THREE.TubeGeometry(curve, 18, 0.022, 5, false), wireMat);
+    const wire = new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.022, 5, false), wireMat);
     group.add(wire);
   });
 
-  return { group, bulbMats };
+  return { group: optimizeStaticGroup(group), bulbMats };
 }
 
 export function createSupplyCluster(textures: ProceduralTextureSet, isSoftwareGl: boolean): THREE.Group {
@@ -1754,7 +1765,7 @@ export function createSupplyCluster(textures: ProceduralTextureSet, isSoftwareGl
   blueDrum.receiveShadow = true;
 
   group.add(redDrum, blueDrum);
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createSandbagBarricade(isSoftwareGl: boolean): THREE.Group {
@@ -1797,7 +1808,7 @@ export function createSandbagBarricade(isSoftwareGl: boolean): THREE.Group {
   }
 
   // Stacked Burlap Sandbags flanking the barrier
-  const bagGeo = new THREE.CapsuleGeometry(0.18, 0.38, 6, 12);
+  const bagGeo = new THREE.CapsuleGeometry(0.18, 0.38, 6, 10);
   for (let row = 0; row < 3; row++) {
     const count = 4 - row;
     for (let i = 0; i < count; i++) {
@@ -1809,12 +1820,11 @@ export function createSandbagBarricade(isSoftwareGl: boolean): THREE.Group {
       const bz = (row % 2 === 0 ? 0.03 : -0.03);
       bag.position.set(bx, by, bz);
       bag.rotation.y = (i % 2 === 0 ? 0.08 : -0.06);
-      bag.castShadow = !isSoftwareGl;
       group.add(bag);
     }
   }
 
-  return group;
+  return optimizeStaticGroup(group);
 }
 
 export function createTerrainSkirt(): THREE.Mesh {
@@ -2184,7 +2194,7 @@ export function createTwilightSkyline(): {
   halo.position.copy(moon.position);
   group.add(moon, halo);
 
-  return { group, skyUniforms };
+  return { group: optimizeStaticGroup(group, [skyDome, moon, halo]), skyUniforms };
 }
 
 // =========================================================================
@@ -2697,6 +2707,6 @@ export function createRailCrossingGate(isSoftwareGl: boolean): {
     group.add(sigPost, bulb);
   });
 
-  return { group, beaconMats };
+  return { group: optimizeStaticGroup(group), beaconMats };
 }
 

@@ -70,6 +70,8 @@ import {
   createWaterTowerModel,
 } from './shopInteriors';
 import { soundEngine } from '../audio/soundEngine';
+import { instantiateGroupAtTransforms, optimizeStaticGroup } from './geometryBatch';
+import { isTouchOrMobileDevice } from '../utils/mobileFullscreen';
 
 export interface WorldSceneProps {
   phase: GamePhase;
@@ -144,20 +146,27 @@ export function WorldScene({
       return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
     })();
 
+    const isMobileGpu = !isSoftwareGl && isTouchOrMobileDevice();
+    let currentDpr = isSoftwareGl
+      ? 1
+      : isMobileGpu
+        ? Math.min(window.devicePixelRatio || 1, 1.3)
+        : Math.min(window.devicePixelRatio || 1, 1.5);
+
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
 
     const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
+      antialias: !isSoftwareGl && !isMobileGpu,
       powerPreference: 'high-performance',
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.96;
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    renderer.toneMappingExposure = isMobileGpu ? 1.04 : 0.96;
+    renderer.setPixelRatio(currentDpr);
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = !isSoftwareGl;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = isMobileGpu ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 
     const canvas = renderer.domElement;
     canvas.style.display = 'block';
@@ -185,11 +194,12 @@ export function WorldScene({
     const camera = new THREE.PerspectiveCamera(54, width / height, 0.2, 420);
     camera.position.set(0, 18, 34);
 
-    // Hardware-GPU HDR Post-Processing (high threshold 1.45 so only true emissives bloom, never characters/roads)
+    // Desktop-GPU HDR Post-Processing (high threshold 1.45 so only true emissives bloom, never characters/roads)
+    // Mobile GPUs skip multi-pass UnrealBloomPass to maintain locked 60fps.
     let composer: EffectComposer | null = null;
-    if (!isSoftwareGl) {
+    if (!isSoftwareGl && !isMobileGpu) {
       composer = new EffectComposer(renderer);
-      composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      composer.setPixelRatio(currentDpr);
       composer.setSize(width, height);
       composer.addPass(new RenderPass(scene, camera));
       composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), 0.14, 0.3, 1.45));
@@ -197,20 +207,22 @@ export function WorldScene({
     }
 
     // 3-Point Warm/Cool Lighting Rig + Dynamic Player-Tracking Shadow Frustum
-    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x0f172a, 0.45);
+    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x0f172a, isMobileGpu ? 0.54 : 0.45);
     scene.add(hemiLight);
 
     const keyLight = new THREE.DirectionalLight(0xffdca8, 1.18);
     keyLight.position.set(34, 48, 28);
     keyLight.castShadow = !isSoftwareGl;
-    const shadowRes = isSoftwareGl ? 1024 : 2048;
+    const shadowRes = isSoftwareGl || isMobileGpu ? 1024 : 2048;
+    const titleShadowSpan = 48;
+    const playShadowSpan = isMobileGpu ? 22 : 26;
     keyLight.shadow.mapSize.set(shadowRes, shadowRes);
     keyLight.shadow.camera.near = 2;
     keyLight.shadow.camera.far = 155;
-    keyLight.shadow.camera.left = -58;
-    keyLight.shadow.camera.right = 58;
-    keyLight.shadow.camera.top = 58;
-    keyLight.shadow.camera.bottom = -58;
+    keyLight.shadow.camera.left = -titleShadowSpan;
+    keyLight.shadow.camera.right = titleShadowSpan;
+    keyLight.shadow.camera.top = titleShadowSpan;
+    keyLight.shadow.camera.bottom = -titleShadowSpan;
     keyLight.shadow.bias = -0.0004;
     keyLight.shadow.normalBias = 0.02;
     scene.add(keyLight);
@@ -225,7 +237,7 @@ export function WorldScene({
     lanternLight.position.set(0, 2.9, 0);
     scene.add(lanternLight);
 
-    const textures = createProceduralTextures(renderer);
+    const textures = createProceduralTextures(renderer, isMobileGpu ? 2 : 8);
 
     // Distant Multi-Tier Skyline, Sunset Atmospheric Sky Shader & Moon
     const skyline = createTwilightSkyline();
@@ -321,53 +333,46 @@ export function WorldScene({
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     });
-    const dashGeoNS = new THREE.PlaneGeometry(0.24, 1.8);
-    const dashGeoEW = new THREE.PlaneGeometry(1.8, 0.24);
+    const dashPlacements: Array<{ x: number; y: number; z: number; sx: number; sz: number }> = [];
     for (let d = -70.0; d <= 70.0; d += 4.5) {
       if (Math.abs(d) < 11.5) continue;
-      const dNS = new THREE.Mesh(dashGeoNS, dashMat);
-      dNS.rotation.x = -Math.PI / 2;
-      dNS.position.set(0, 0.015, d);
-      const dEW = new THREE.Mesh(dashGeoEW, dashMat);
-      dEW.rotation.x = -Math.PI / 2;
-      dEW.position.set(d, 0.015, 0);
-      scene.add(dNS, dEW);
+      dashPlacements.push({ x: 0, y: 0.015, z: d, sx: 0.24, sz: 1.8 });
+      dashPlacements.push({ x: d, y: 0.015, z: 0, sx: 1.8, sz: 0.24 });
     }
     for (let d = -48.0; d <= 48.0; d += 5.0) {
       if (Math.abs(d) < 6.0) continue;
       for (const rx of [-52, 52]) {
-        const rd = new THREE.Mesh(dashGeoNS, dashMat);
-        rd.rotation.x = -Math.PI / 2;
-        rd.position.set(rx, 0.014, d);
-        scene.add(rd);
+        dashPlacements.push({ x: rx, y: 0.014, z: d, sx: 0.24, sz: 1.8 });
       }
       for (const rz of [-52, 52]) {
-        const rd = new THREE.Mesh(dashGeoEW, dashMat);
-        rd.rotation.x = -Math.PI / 2;
-        rd.position.set(d, 0.014, rz);
-        scene.add(rd);
+        dashPlacements.push({ x: d, y: 0.014, z: rz, sx: 1.8, sz: 0.24 });
       }
     }
-
     // Zebra Crossings approaching Adda Chowk from all 4 avenues
-    const zebraGeoNS = new THREE.PlaneGeometry(0.55, 2.2);
-    const zebraGeoEW = new THREE.PlaneGeometry(2.2, 0.55);
     for (let s = -4; s <= 4; s += 1.3) {
       for (const zPos of [-10.8, 10.8]) {
-        const zStripe = new THREE.Mesh(zebraGeoNS, dashMat);
-        zStripe.rotation.x = -Math.PI / 2;
-        zStripe.position.set(s, 0.018, zPos);
-        scene.add(zStripe);
+        dashPlacements.push({ x: s, y: 0.018, z: zPos, sx: 0.55, sz: 2.2 });
       }
       for (const xPos of [-10.8, 10.8]) {
-        const xStripe = new THREE.Mesh(zebraGeoEW, dashMat);
-        xStripe.rotation.x = -Math.PI / 2;
-        xStripe.position.set(xPos, 0.018, s);
-        scene.add(xStripe);
+        dashPlacements.push({ x: xPos, y: 0.018, z: s, sx: 2.2, sz: 0.55 });
       }
     }
+    const instDummy = new THREE.Object3D();
+    const dashUnitGeo = new THREE.PlaneGeometry(1, 1);
+    dashUnitGeo.rotateX(-Math.PI / 2);
+    const dashInst = new THREE.InstancedMesh(dashUnitGeo, dashMat, dashPlacements.length);
+    dashPlacements.forEach((p, idx) => {
+      instDummy.position.set(p.x, p.y, p.z);
+      instDummy.rotation.set(0, 0, 0);
+      instDummy.scale.set(p.sx, 1, p.sz);
+      instDummy.updateMatrix();
+      dashInst.setMatrixAt(idx, instDummy.matrix);
+    });
+    dashInst.instanceMatrix.needsUpdate = true;
+    dashInst.computeBoundingSphere();
+    scene.add(dashInst);
 
-    // Textured District Plazas + Shop-Authentic Interior Floors + Beveled Stone Curbs
+    // Textured District Plazas + Shop-Authentic Interior Floors + Instanced Beveled Stone Curbs
     const curbMat = new THREE.MeshStandardMaterial({ color: '#64748b', roughness: 0.78 });
     const shopTintByZone: Record<string, string> = {
       cha_dokan: '#d6bfa9',
@@ -378,6 +383,7 @@ export function WorldScene({
       fuchka_corner: '#e2c29b',
       biyer_pandal: '#e6becc',
     };
+    const borderCurbPlacements: Array<{ x: number; y: number; z: number; sx: number; sz: number }> = [];
     for (const zDef of ZONES) {
       if (zDef.id === 'pukur_ghat') continue;
       const isCentral = zDef.id === 'adda_chowk';
@@ -442,19 +448,28 @@ export function WorldScene({
       scene.add(pad);
 
       if (isCentral || isEidgah || isCricket || zDef.id === 'fuchka_corner' || zDef.id === 'biyer_pandal') {
-        const borderN = new THREE.Mesh(new THREE.BoxGeometry(zDef.width + 0.4, 0.12, 0.28), curbMat);
-        borderN.position.set(zDef.x, 0.06, zDef.z - zDef.depth / 2);
-        const borderS = borderN.clone();
-        borderS.position.z = zDef.z + zDef.depth / 2;
-        const borderW = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.12, zDef.depth + 0.4), curbMat);
-        borderW.position.set(zDef.x - zDef.width / 2, 0.06, zDef.z);
-        const borderE = borderW.clone();
-        borderE.position.x = zDef.x + zDef.width / 2;
-        scene.add(borderN, borderS, borderW, borderE);
+        borderCurbPlacements.push(
+          { x: zDef.x, y: 0.06, z: zDef.z - zDef.depth / 2, sx: zDef.width + 0.4, sz: 0.28 },
+          { x: zDef.x, y: 0.06, z: zDef.z + zDef.depth / 2, sx: zDef.width + 0.4, sz: 0.28 },
+          { x: zDef.x - zDef.width / 2, y: 0.06, z: zDef.z, sx: 0.28, sz: zDef.depth + 0.4 },
+          { x: zDef.x + zDef.width / 2, y: 0.06, z: zDef.z, sx: 0.28, sz: zDef.depth + 0.4 },
+        );
       }
     }
+    const borderCurbGeo = new THREE.BoxGeometry(1, 0.12, 1);
+    const borderCurbInst = new THREE.InstancedMesh(borderCurbGeo, curbMat, borderCurbPlacements.length);
+    borderCurbPlacements.forEach((p, idx) => {
+      instDummy.position.set(p.x, p.y, p.z);
+      instDummy.rotation.set(0, 0, 0);
+      instDummy.scale.set(p.sx, 1, p.sz);
+      instDummy.updateMatrix();
+      borderCurbInst.setMatrixAt(idx, instDummy.matrix);
+    });
+    borderCurbInst.instanceMatrix.needsUpdate = true;
+    borderCurbInst.computeBoundingSphere();
+    scene.add(borderCurbInst);
 
-    // Concrete Sidewalk Kerbs + Dhaka Black/Yellow Kerb Edging & Storm Drains (clear of ±10.8 zebra crossings)
+    // Concrete Sidewalk Kerbs + Dhaka Black/Yellow Kerb Edging & Storm Drains (Instanced into 4 draw calls)
     const sidewalkSlabMat = new THREE.MeshStandardMaterial({
       color: '#64748b',
       roughness: 0.84,
@@ -464,38 +479,11 @@ export function WorldScene({
     const kerbSlateMat = new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.65 });
     const grateMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.45, metalness: 0.72 });
 
-    const buildKerbSegment = (cx: number, cz: number, isNS: boolean, roadSign: number) => {
-      const len = 11.2;
-      const wid = 1.15;
-      const slabGeo = isNS ? new THREE.BoxGeometry(wid, 0.08, len) : new THREE.BoxGeometry(len, 0.08, wid);
-      const slab = new THREE.Mesh(slabGeo, sidewalkSlabMat);
-      slab.position.set(cx, 0.04, cz);
-      slab.receiveShadow = true;
-      scene.add(slab);
-
-      const segCount = 8;
-      const segLen = len / segCount;
-      for (let i = 0; i < segCount; i++) {
-        const offset = -len / 2 + segLen * (i + 0.5);
-        const kMat = i % 2 === 0 ? kerbYellowMat : kerbSlateMat;
-        const blockGeo = isNS
-          ? new THREE.BoxGeometry(0.22, 0.13, segLen - 0.04)
-          : new THREE.BoxGeometry(segLen - 0.04, 0.13, 0.22);
-        const block = new THREE.Mesh(blockGeo, kMat);
-        if (isNS) {
-          block.position.set(cx + roadSign * (wid / 2 - 0.11), 0.065, cz + offset);
-        } else {
-          block.position.set(cx + offset, 0.065, cz + roadSign * (wid / 2 - 0.11));
-        }
-        block.receiveShadow = true;
-        scene.add(block);
-      }
-
-      const grateGeo = isNS ? new THREE.BoxGeometry(0.45, 0.03, 0.85) : new THREE.BoxGeometry(0.85, 0.03, 0.45);
-      const grate = new THREE.Mesh(grateGeo, grateMat);
-      grate.position.set(cx, 0.085, cz);
-      scene.add(grate);
-    };
+    type BoxTransform = { x: number; y: number; z: number; sx: number; sy: number; sz: number };
+    const slabTransforms: BoxTransform[] = [];
+    const yellowKerbTransforms: BoxTransform[] = [];
+    const slateKerbTransforms: BoxTransform[] = [];
+    const grateTransforms: BoxTransform[] = [];
 
     for (const [cx, cz, isNS, roadSign] of [
       [-6.55, -18.5, true, 1],
@@ -507,8 +495,61 @@ export function WorldScene({
       [18.5, -6.55, false, 1],
       [18.5, 6.55, false, -1],
     ] as const) {
-      buildKerbSegment(cx, cz, isNS, roadSign);
+      const len = 11.2;
+      const wid = 1.15;
+      slabTransforms.push({
+        x: cx,
+        y: 0.04,
+        z: cz,
+        sx: isNS ? wid : len,
+        sy: 0.08,
+        sz: isNS ? len : wid,
+      });
+
+      const segCount = 8;
+      const segLen = len / segCount;
+      for (let i = 0; i < segCount; i++) {
+        const offset = -len / 2 + segLen * (i + 0.5);
+        const list = i % 2 === 0 ? yellowKerbTransforms : slateKerbTransforms;
+        list.push({
+          x: isNS ? cx + roadSign * (wid / 2 - 0.11) : cx + offset,
+          y: 0.065,
+          z: isNS ? cz + offset : cz + roadSign * (wid / 2 - 0.11),
+          sx: isNS ? 0.22 : segLen - 0.04,
+          sy: 0.13,
+          sz: isNS ? segLen - 0.04 : 0.22,
+        });
+      }
+
+      grateTransforms.push({
+        x: cx,
+        y: 0.085,
+        z: cz,
+        sx: isNS ? 0.45 : 0.85,
+        sy: 0.03,
+        sz: isNS ? 0.85 : 0.45,
+      });
     }
+
+    const unitBoxGeo = new THREE.BoxGeometry(1, 1, 1);
+    const buildInstancedBoxes = (transforms: BoxTransform[], mat: THREE.Material, receiveShadow: boolean) => {
+      const inst = new THREE.InstancedMesh(unitBoxGeo, mat, transforms.length);
+      inst.receiveShadow = receiveShadow;
+      transforms.forEach((tr, idx) => {
+        instDummy.position.set(tr.x, tr.y, tr.z);
+        instDummy.rotation.set(0, 0, 0);
+        instDummy.scale.set(tr.sx, tr.sy, tr.sz);
+        instDummy.updateMatrix();
+        inst.setMatrixAt(idx, instDummy.matrix);
+      });
+      inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
+      scene.add(inst);
+    };
+    buildInstancedBoxes(slabTransforms, sidewalkSlabMat, true);
+    buildInstancedBoxes(yellowKerbTransforms, kerbYellowMat, true);
+    buildInstancedBoxes(slateKerbTransforms, kerbSlateMat, true);
+    buildInstancedBoxes(grateTransforms, grateMat, false);
 
     // Bengali Alpona Mandala around Adda Chowk center
     const alponaDisc = new THREE.Mesh(
@@ -635,6 +676,7 @@ export function WorldScene({
       'rail_cabin_e',
     ]);
 
+    const capsGroup = new THREE.Group();
     for (const w of WALLS) {
       if (skipWallIds.has(w.id)) {
         continue;
@@ -650,30 +692,40 @@ export function WorldScene({
       wallMesh.castShadow = !isSoftwareGl;
       wallMesh.receiveShadow = true;
       scene.add(wallMesh);
-      wallMeshes.push(wallMesh);
+      if (w.height >= 2.2) {
+        wallMeshes.push(wallMesh);
+      }
 
       const capMat = (w.zone && zoneCopingMatMap[w.zone]) || copingMat;
       const cap = new THREE.Mesh(new THREE.BoxGeometry(wWidth + 0.16, 0.14, wDepth + 0.16), capMat);
       cap.position.set(cx, w.height + 0.07, cz);
       cap.receiveShadow = true;
-      scene.add(cap);
+      capsGroup.add(cap);
     }
+    scene.add(optimizeStaticGroup(capsGroup));
 
-    // Periodic Concrete Pilasters along the 160m Compound Perimeter Walls
+    // Periodic Concrete Pilasters along the 160m Compound Perimeter Walls (1 InstancedMesh draw call)
+    const pilasterTransforms: BoxTransform[] = [];
     for (let p = -68; p <= 68; p += 14) {
       for (const pz of [-78.8, 78.8]) {
-        const pil = new THREE.Mesh(new THREE.BoxGeometry(1.1, 3.85, 2.1), pillarMat);
-        pil.position.set(p, 1.925, pz);
-        pil.castShadow = !isSoftwareGl;
-        scene.add(pil);
+        pilasterTransforms.push({ x: p, y: 1.925, z: pz, sx: 1.1, sy: 3.85, sz: 2.1 });
       }
       for (const px of [-78.8, 78.8]) {
-        const pil = new THREE.Mesh(new THREE.BoxGeometry(2.1, 3.85, 1.1), pillarMat);
-        pil.position.set(px, 1.925, p);
-        pil.castShadow = !isSoftwareGl;
-        scene.add(pil);
+        pilasterTransforms.push({ x: px, y: 1.925, z: p, sx: 2.1, sy: 3.85, sz: 1.1 });
       }
     }
+    const pilasterInst = new THREE.InstancedMesh(unitBoxGeo, pillarMat, pilasterTransforms.length);
+    pilasterInst.receiveShadow = true;
+    pilasterTransforms.forEach((tr, idx) => {
+      instDummy.position.set(tr.x, tr.y, tr.z);
+      instDummy.rotation.set(0, 0, 0);
+      instDummy.scale.set(tr.sx, tr.sy, tr.sz);
+      instDummy.updateMatrix();
+      pilasterInst.setMatrixAt(idx, instDummy.matrix);
+    });
+    pilasterInst.instanceMatrix.needsUpdate = true;
+    pilasterInst.computeBoundingSphere();
+    scene.add(pilasterInst);
 
     // Distinct Corner Building Columns + Colored Corrugated Eaves + Rooftop Architecture + Doorway Nameplates
     const cornerBuildings: Array<{
@@ -972,12 +1024,11 @@ export function WorldScene({
       [9.1, -70.2, 0.22],
       [62.0, 34.2, -0.3],
     ];
-    for (const [sx, sz, sRot] of supplySpots) {
-      const cluster = createSupplyCluster(textures, isSoftwareGl);
-      cluster.position.set(sx, 0, sz);
-      cluster.rotation.y = sRot;
-      scene.add(cluster);
-    }
+    instantiateGroupAtTransforms(
+      createSupplyCluster(textures, isSoftwareGl),
+      supplySpots.map(([x, z, rotY]) => ({ x, z, rotY })),
+      scene,
+    );
 
     const barricadeSpots: Array<[number, number, number]> = [
       [-13.5, -45.2, 0.08],
@@ -985,18 +1036,17 @@ export function WorldScene({
       [-11.5, 45.2, -0.06],
       [11.5, 45.2, 0.06],
     ];
-    for (const [bx, bz, bRot] of barricadeSpots) {
-      const bar = createSandbagBarricade(isSoftwareGl);
-      bar.position.set(bx, 0, bz);
-      bar.rotation.y = bRot;
-      scene.add(bar);
-    }
+    instantiateGroupAtTransforms(
+      createSandbagBarricade(isSoftwareGl),
+      barricadeSpots.map(([x, z, rotY]) => ({ x, z, rotY })),
+      scene,
+    );
 
     // Wind-Swaying Instanced Grass Tufts across Eidgah, Pukur Bank & Outer Verges
     const instancedGrass = createInstancedGrassTufts();
     scene.add(instancedGrass.mesh);
 
-    // Terracotta Planter Pots flanking plazas & entrances
+    // Terracotta Planter Pots flanking plazas & entrances (InstancedMesh)
     const planterSpots: Array<[number, number]> = [
       [-8.4, -8.4],
       [8.4, -8.4],
@@ -1019,11 +1069,11 @@ export function WorldScene({
       [-8.5, -59.5],
       [8.5, -59.5],
     ];
-    for (const [px, pz] of planterSpots) {
-      const pot = createPlanterPot();
-      pot.position.set(px, 0, pz);
-      scene.add(pot);
-    }
+    instantiateGroupAtTransforms(
+      createPlanterPot(),
+      planterSpots.map(([x, z]) => ({ x, z })),
+      scene,
+    );
 
     // Moricbatti Fairy Garlands above Adda Chowk
     const garlands = createMoricbattiGarlands();
@@ -1048,15 +1098,14 @@ export function WorldScene({
     const railGate = createRailCrossingGate(isSoftwareGl);
     scene.add(railGate.group);
 
-    const rickshaw = createRickshawModel(textures, isSoftwareGl);
-    rickshaw.position.set(36.5, 0, -33.5);
-    rickshaw.rotation.y = -0.55;
-    scene.add(rickshaw);
-
-    const rickshaw2 = createRickshawModel(textures, isSoftwareGl);
-    rickshaw2.position.set(27.8, 0, -32.2);
-    rickshaw2.rotation.y = 0.12;
-    scene.add(rickshaw2);
+    instantiateGroupAtTransforms(
+      createRickshawModel(textures, isSoftwareGl),
+      [
+        { x: 36.5, z: -33.5, rotY: -0.55 },
+        { x: 27.8, z: -32.2, rotY: 0.12 },
+      ],
+      scene,
+    );
 
     // Iconic Dhaka Green CNG Auto-Rickshaw parked along the Moholla avenue
     const cng = createCngModel(isSoftwareGl);
@@ -1098,12 +1147,11 @@ export function WorldScene({
       [-24.0, 21.5, 0.4],
       [24.0, 21.5, -0.4],
     ];
-    for (const [ux, uz, ry] of poleCoords) {
-      const pole = createUtilityPole();
-      pole.position.set(ux, 0, uz);
-      pole.rotation.y = ry;
-      scene.add(pole);
-    }
+    instantiateGroupAtTransforms(
+      createUtilityPole(),
+      poleCoords.map(([x, z, rotY]) => ({ x, z, rotY })),
+      scene,
+    );
     scene.add(
       createOverheadWires([
         [-14.5, -21.5, 14.5, -21.5],
@@ -1115,7 +1163,7 @@ export function WorldScene({
       ]),
     );
 
-    // Palm Trees & Crimson Krishnachura Trees (160m Compound Corners + Outer Groves)
+    // Palm Trees & Crimson Krishnachura Trees (Instanced across 160m Compound & Outer Groves)
     const palmCoords: Array<[number, number, number]> = [
       [-72.0, -72.0, 1.18],
       [72.0, -72.0, 1.12],
@@ -1132,13 +1180,11 @@ export function WorldScene({
       [-42.0, -88.0, 1.3],
       [42.0, -88.0, 1.24],
     ];
-    for (const [tx, tz, sc] of palmCoords) {
-      const tree = createPalmTree(isSoftwareGl);
-      tree.position.set(tx, 0, tz);
-      tree.scale.setScalar(sc);
-      tree.rotation.y = tx * 0.7;
-      scene.add(tree);
-    }
+    instantiateGroupAtTransforms(
+      createPalmTree(isSoftwareGl),
+      palmCoords.map(([x, z, scale]) => ({ x, z, rotY: x * 0.7, scale })),
+      scene,
+    );
 
     const krishnachuraCoords: Array<[number, number, number]> = [
       [-18.0, -56.0, 1.12],
@@ -1150,15 +1196,13 @@ export function WorldScene({
       [-86.0, -8.0, 1.28],
       [86.0, 8.0, 1.25],
     ];
-    for (const [kx, kz, sc] of krishnachuraCoords) {
-      const kt = createKrishnachuraTree(isSoftwareGl);
-      kt.position.set(kx, 0, kz);
-      kt.scale.setScalar(sc);
-      kt.rotation.y = kz * 0.4;
-      scene.add(kt);
-    }
+    instantiateGroupAtTransforms(
+      createKrishnachuraTree(isSoftwareGl),
+      krishnachuraCoords.map(([x, z, scale]) => ({ x, z, rotY: z * 0.4, scale })),
+      scene,
+    );
 
-    // 20 Street Lamps (first 11 attach real PointLights -> total <= 12 incl. lantern; remaining 9 use emissive + cones + glow pools)
+    // 20 Instanced Street Lamps (0 static PointLights on Mobile GPU, 4 Adda Chowk PointLights on Desktop)
     const lampCoords: Array<[number, number, number]> = [
       [-9.2, -9.2, Math.PI / 4],
       [9.2, -9.2, (Math.PI * 3) / 4],
@@ -1171,7 +1215,6 @@ export function WorldScene({
       [-6.5, -59.5, 0],
       [-55.5, -26.0, Math.PI / 2],
       [55.5, 26.0, -Math.PI / 2],
-      // Non-PointLight outer boulevard & district illumination poles
       [-10.5, -28.0, 0],
       [10.5, -28.0, Math.PI],
       [-10.5, 28.0, 0],
@@ -1183,60 +1226,86 @@ export function WorldScene({
       [55.5, -26.0, -Math.PI / 2],
     ];
     const lampBulbs: THREE.PointLight[] = [];
-    const lampGlows: THREE.Mesh[] = [];
-    const lampCones: THREE.Mesh[] = [];
+    const lampNormalPoolOpacity = isMobileGpu ? 0.095 : 0.06;
     const glowPoolMat = new THREE.MeshBasicMaterial({
       color: '#fbbf24',
       transparent: true,
-      opacity: 0.06,
+      opacity: lampNormalPoolOpacity,
       depthWrite: false,
     });
-    lampCoords.forEach(([lx, lz, rot], idx) => {
-      const lamp = createStreetLamp();
-      lamp.group.position.set(lx, 0, lz);
-      lamp.group.rotation.y = rot;
-      scene.add(lamp.group);
-      lampCones.push(lamp.coneMesh);
-      if (idx < 11) {
-        const pt = new THREE.PointLight(0xfbbf24, 1.0, 15, 1.85);
+    const lampTemplate = createStreetLamp();
+    lampTemplate.coneMesh.removeFromParent();
+    if (isMobileGpu && lampTemplate.coneMesh.material instanceof THREE.MeshBasicMaterial) {
+      lampTemplate.coneMesh.material.opacity = 0.048;
+    }
+    const lampTransforms = lampCoords.map(([x, z, rotY]) => ({ x, z, rotY }));
+    instantiateGroupAtTransforms(lampTemplate.group, lampTransforms, scene);
+
+    const coneHolder = new THREE.Group();
+    coneHolder.add(lampTemplate.coneMesh);
+    const [lampConesInst] = instantiateGroupAtTransforms(coneHolder, lampTransforms, scene);
+
+    const poolGeo = new THREE.CircleGeometry(3.8, 24);
+    poolGeo.rotateX(-Math.PI / 2);
+    const lampGlowInst = new THREE.InstancedMesh(poolGeo, glowPoolMat, lampCoords.length);
+    lampCoords.forEach(([lx, lz], idx) => {
+      instDummy.position.set(lx, 0.024, lz);
+      instDummy.rotation.set(0, 0, 0);
+      instDummy.scale.set(1, 1, 1);
+      instDummy.updateMatrix();
+      lampGlowInst.setMatrixAt(idx, instDummy.matrix);
+      if (!isMobileGpu && !isSoftwareGl && idx < 4) {
+        const pt = new THREE.PointLight(0xfbbf24, 1.15, 16, 1.8);
         pt.position.set(lx, 4.1, lz);
         scene.add(pt);
         lampBulbs.push(pt);
       }
-
-      const pool = new THREE.Mesh(new THREE.CircleGeometry(3.8, 24), glowPoolMat);
-      pool.rotation.x = -Math.PI / 2;
-      pool.position.set(lx, 0.024, lz);
-      scene.add(pool);
-      lampGlows.push(pool);
     });
+    lampGlowInst.instanceMatrix.needsUpdate = true;
+    lampGlowInst.computeBoundingSphere();
+    scene.add(lampGlowInst);
 
-    // 13 Drains / Vents across Inner & Outer Districts
-    for (const v of VENTS) {
-      const ventMesh = createDrainVent();
-      ventMesh.position.set(v.x, 0.02, v.z);
-      scene.add(ventMesh);
-    }
+    // 13 Instanced Drains / Vents across Inner & Outer Districts
+    instantiateGroupAtTransforms(
+      createDrainVent(),
+      VENTS.map((v) => ({ x: v.x, y: 0.02, z: v.z })),
+      scene,
+    );
 
-    // 140 Pooled Twilight Fireflies across the 160x160m Moholla
+    // 140 GPU-Animated Twilight Fireflies across the 160x160m Moholla (zero CPU update loop)
     const fireflyCount = 140;
     const fireflyPositions = new Float32Array(fireflyCount * 3);
-    const fireflyBase: Array<{ x: number; y: number; z: number; phase: number }> = [];
+    const fireflyPhases = new Float32Array(fireflyCount);
     for (let i = 0; i < fireflyCount; i++) {
       const fx = ((i * 53) % 148) - 74;
       const fz = ((i * 79) % 148) - 74;
       const fy = 0.8 + (i % 5) * 0.48;
-      fireflyBase.push({ x: fx, y: fy, z: fz, phase: i * 0.9 });
       fireflyPositions[i * 3] = fx;
       fireflyPositions[i * 3 + 1] = fy;
       fireflyPositions[i * 3 + 2] = fz;
+      fireflyPhases[i] = i * 0.9;
     }
     const fireflyGeo = new THREE.BufferGeometry();
     fireflyGeo.setAttribute('position', new THREE.BufferAttribute(fireflyPositions, 3));
-    const fireflyPoints = new THREE.Points(
-      fireflyGeo,
-      new THREE.PointsMaterial({ color: '#fde68a', size: 0.17, transparent: true, opacity: 0.74 }),
-    );
+    fireflyGeo.setAttribute('aPhase', new THREE.BufferAttribute(fireflyPhases, 1));
+    const fireflyUniforms = { uTime: { value: 0 } };
+    const fireflyMat = new THREE.PointsMaterial({
+      color: '#fde68a',
+      size: 0.17,
+      transparent: true,
+      opacity: 0.74,
+    });
+    fireflyMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = fireflyUniforms.uTime;
+      shader.vertexShader = `attribute float aPhase;\nuniform float uTime;\n${shader.vertexShader}`.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+         transformed.x += sin(uTime * 0.7 + aPhase) * 0.65;
+         transformed.y += sin(uTime * 1.4 + aPhase) * 0.25;
+         transformed.z += cos(uTime * 0.8 + aPhase) * 0.65;`,
+      );
+    };
+    const fireflyPoints = new THREE.Points(fireflyGeo, fireflyMat);
     scene.add(fireflyPoints);
 
     // Task Station Glowing Beacons
@@ -1520,8 +1589,10 @@ export function WorldScene({
       const h = container.clientHeight || window.innerHeight;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      renderer.setPixelRatio(currentDpr);
       renderer.setSize(w, h);
       if (composer) {
+        composer.setPixelRatio(currentDpr);
         composer.setSize(w, h);
         composer.render();
       } else {
@@ -1555,6 +1626,23 @@ export function WorldScene({
     let lastTime = performance.now();
     let frameId = 0;
     let disposed = false;
+    let slowFrameCount = 0;
+    let slowFrameSum = 0;
+
+    const _activeIds = new Set<string>();
+    const _bodyIds = new Set<string>();
+    const _completedTaskIds = new Set<string>();
+    const _assignedTaskIds = new Set<string>();
+
+    (window as unknown as Record<string, unknown>).__KE_BATPAR_STATS__ = () => ({
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      geometries: renderer.info.memory.geometries,
+      textures: renderer.info.memory.textures,
+      dpr: renderer.getPixelRatio(),
+      isMobileGpu,
+      hasComposer: Boolean(composer),
+    });
 
     const afterDraw = (cb: () => void) => {
       const gl = renderer.getContext() as WebGL2RenderingContext;
@@ -1574,12 +1662,12 @@ export function WorldScene({
     };
 
     const syncActorsFromSnapshot = (snap: RoomSnapshot, dt: number) => {
-      const activeIds = new Set<string>();
+      _activeIds.clear();
       const localId = localPlayerIdRef.current;
       const localPlayer = snap.players.find((p) => p.id === localId);
 
       for (const p of snap.players) {
-        activeIds.add(p.id);
+        _activeIds.add(p.id);
         let entry = playerRigs.get(p.id);
         const visColorId = p.disguiseColor ?? p.color;
         const visName = p.disguiseName ?? p.name;
@@ -1733,16 +1821,16 @@ export function WorldScene({
       }
 
       for (const [id, entry] of playerRigs.entries()) {
-        if (!activeIds.has(id)) {
+        if (!_activeIds.has(id)) {
           scene.remove(entry.rig.root);
           playerRigs.delete(id);
         }
       }
 
-      const bodyIds = new Set<string>();
+      _bodyIds.clear();
       for (const b of snap.bodies) {
         if (b.reported) continue;
-        bodyIds.add(b.id);
+        _bodyIds.add(b.id);
         if (!bodyMeshes.has(b.id)) {
           const mesh = createBodyMarkerMesh(getColorSpec(b.color), textures.contactShadowMap);
           mesh.position.set(b.x, 0, b.z);
@@ -1751,7 +1839,7 @@ export function WorldScene({
         }
       }
       for (const [id, mesh] of bodyMeshes.entries()) {
-        if (!bodyIds.has(id)) {
+        if (!_bodyIds.has(id)) {
           scene.remove(mesh);
           bodyMeshes.delete(id);
         }
@@ -1790,10 +1878,28 @@ export function WorldScene({
       const dt = Math.min(rawDt, 0.05);
       elapsed += dt;
 
+      if (isMobileGpu && currentDpr > 1.01) {
+        slowFrameCount += 1;
+        slowFrameSum += rawDt;
+        if (slowFrameCount >= 45) {
+          const avgDt = slowFrameSum / slowFrameCount;
+          slowFrameCount = 0;
+          slowFrameSum = 0;
+          if (avgDt > 0.028) {
+            currentDpr = 1.0;
+            renderer.setPixelRatio(1.0);
+            const rw = container.clientWidth || window.innerWidth;
+            const rh = container.clientHeight || window.innerHeight;
+            renderer.setSize(rw, rh);
+          }
+        }
+      }
+
       textures.waterMap.offset.y = (elapsed * 0.06) % 1;
       waterUniforms.uTime.value = elapsed;
       skyline.skyUniforms.uTime.value = elapsed;
       instancedGrass.grassUniforms.uTime.value = elapsed;
+      fireflyUniforms.uTime.value = elapsed;
 
       // Gentle bobbing on Pukur wooden boat & Shapla lotuses + Shop & Landmark Animations
       pukurDetails.boat.position.y = 0.07 + Math.sin(elapsed * 1.8) * 0.025;
@@ -1815,19 +1921,6 @@ export function WorldScene({
       const railPhase = Math.sin(elapsed * 4.5) > 0;
       railGate.beaconMats[0].emissiveIntensity = railPhase ? 1.8 : 0.12;
       railGate.beaconMats[1].emissiveIntensity = railPhase ? 0.12 : 1.8;
-
-      // Update twilight fireflies
-      const posAttr = fireflyGeo.getAttribute('position') as THREE.BufferAttribute;
-      for (let i = 0; i < fireflyCount; i++) {
-        const b = fireflyBase[i];
-        posAttr.setXYZ(
-          i,
-          b.x + Math.sin(elapsed * 0.7 + b.phase) * 0.65,
-          b.y + Math.sin(elapsed * 1.4 + b.phase) * 0.25,
-          b.z + Math.cos(elapsed * 0.8 + b.phase) * 0.65,
-        );
-      }
-      posAttr.needsUpdate = true;
 
       const curPhase = phaseRef.current;
       if (curPhase !== lastObservedPhase) {
@@ -1885,19 +1978,19 @@ export function WorldScene({
           Math.cos(orbitAngle) * 35,
         );
         camera.lookAt(0, 1.5, 0);
-        hemiLight.intensity = 0.45;
+        hemiLight.intensity = isMobileGpu ? 0.54 : 0.45;
         keyLight.intensity = 1.18;
         lanternLight.intensity = 0;
-        for (const lc of lampCones) lc.visible = true;
+        if (lampConesInst) lampConesInst.visible = true;
 
         keyLight.target.position.set(0, 0, 0);
         keyLight.position.set(34, 48, 28);
         keyLight.target.updateMatrixWorld();
-        if (keyLight.shadow.camera.right !== 58) {
-          keyLight.shadow.camera.left = -58;
-          keyLight.shadow.camera.right = 58;
-          keyLight.shadow.camera.top = 58;
-          keyLight.shadow.camera.bottom = -58;
+        if (keyLight.shadow.camera.right !== titleShadowSpan) {
+          keyLight.shadow.camera.left = -titleShadowSpan;
+          keyLight.shadow.camera.right = titleShadowSpan;
+          keyLight.shadow.camera.top = titleShadowSpan;
+          keyLight.shadow.camera.bottom = -titleShadowSpan;
           keyLight.shadow.camera.updateProjectionMatrix();
         }
       } else if (snap) {
@@ -2089,13 +2182,19 @@ export function WorldScene({
 
         syncActorsFromSnapshot(snap, dt);
 
-        const completedSet = new Set(
-          (localPlayer?.tasks ?? []).filter((t) => t.completed).map((t) => t.taskId),
-        );
-        const assignedSet = new Set((localPlayer?.tasks ?? []).map((t) => t.taskId));
+        _completedTaskIds.clear();
+        _assignedTaskIds.clear();
+        if (localPlayer?.tasks) {
+          for (const t of localPlayer.tasks) {
+            _assignedTaskIds.add(t.taskId);
+            if (t.completed) _completedTaskIds.add(t.taskId);
+          }
+        }
         for (const [taskId, ring] of taskBeacons.entries()) {
           const isRelevant =
-            localPlayer?.role === 'parabasi' && assignedSet.has(taskId) && !completedSet.has(taskId);
+            localPlayer?.role === 'parabasi' &&
+            _assignedTaskIds.has(taskId) &&
+            !_completedTaskIds.has(taskId);
           ring.visible = Boolean(isRelevant && curPhase === 'playing');
           if (ring.visible) {
             const s = 1 + Math.sin(elapsed * 4) * 0.1;
@@ -2104,19 +2203,19 @@ export function WorldScene({
         }
 
         const isLoadshedding = snap.sabotage.active === 'loadshedding';
-        const targetHemi = isLoadshedding ? 0.1 : 0.45;
+        const targetHemi = isLoadshedding ? 0.1 : isMobileGpu ? 0.54 : 0.45;
         const targetKey = isLoadshedding ? 0.16 : 1.18;
-        const targetLamp = isLoadshedding ? 0.08 : 1.0;
-        const targetLantern = isLoadshedding ? 1.8 : 0.0;
+        const targetLamp = isLoadshedding ? 0.08 : 1.15;
+        const targetLantern = isLoadshedding ? 1.85 : 0.0;
 
         hemiLight.intensity = THREE.MathUtils.damp(hemiLight.intensity, targetHemi, 5, dt);
         keyLight.intensity = THREE.MathUtils.damp(keyLight.intensity, targetKey, 5, dt);
         lanternLight.intensity = THREE.MathUtils.damp(lanternLight.intensity, targetLantern, 6, dt);
-        glowPoolMat.opacity = isLoadshedding ? 0.015 : 0.06;
+        glowPoolMat.opacity = isLoadshedding ? 0.015 : lampNormalPoolOpacity;
         for (const tm of shopTubeMats) tm.emissiveIntensity = isLoadshedding ? 0.05 : 1.7;
         for (const pm of shopPoolMats) pm.opacity = isLoadshedding ? 0.008 : 0.052;
         garlands.group.visible = !isLoadshedding;
-        for (const lc of lampCones) lc.visible = !isLoadshedding;
+        if (lampConesInst) lampConesInst.visible = !isLoadshedding;
         for (const lb of lampBulbs) {
           lb.intensity = THREE.MathUtils.damp(lb.intensity, targetLamp, 5, dt);
         }
@@ -2129,11 +2228,11 @@ export function WorldScene({
         keyLight.target.position.set(sx, 0, sz);
         keyLight.position.set(sx + 24, 38, sz + 20);
         keyLight.target.updateMatrixWorld();
-        if (keyLight.shadow.camera.right !== 28) {
-          keyLight.shadow.camera.left = -28;
-          keyLight.shadow.camera.right = 28;
-          keyLight.shadow.camera.top = 28;
-          keyLight.shadow.camera.bottom = -28;
+        if (keyLight.shadow.camera.right !== playShadowSpan) {
+          keyLight.shadow.camera.left = -playShadowSpan;
+          keyLight.shadow.camera.right = playShadowSpan;
+          keyLight.shadow.camera.top = playShadowSpan;
+          keyLight.shadow.camera.bottom = -playShadowSpan;
           keyLight.shadow.camera.updateProjectionMatrix();
         }
 
@@ -2270,12 +2369,19 @@ export function WorldScene({
       window.visualViewport?.removeEventListener('resize', onResize);
       resizeObserver?.disconnect();
       canvas.removeEventListener('webglcontextlost', handleContextLost);
+      delete (window as unknown as Record<string, unknown>).__KE_BATPAR_STATS__;
       footprintGeo.dispose();
       for (const slot of footprintPool) slot.mat.dispose();
       splashRingGeo.dispose();
       splashRingMat.dispose();
       splashDropletGeo.dispose();
       splashDropletMat.dispose();
+      dashUnitGeo.dispose();
+      borderCurbGeo.dispose();
+      unitBoxGeo.dispose();
+      poolGeo.dispose();
+      fireflyGeo.dispose();
+      fireflyMat.dispose();
       composer?.dispose();
       roadNormNS.dispose();
       roadRoughNS.dispose();

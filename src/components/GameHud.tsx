@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import {
   PLAYER_COLORS,
   SPECIAL_ROLES,
@@ -131,6 +131,63 @@ const SHORT_ZONE_LABELS: Record<string, string> = {
   pharmacy_mor: 'Pharma',
   biyer_pandal: 'Pandal',
 };
+
+const MinimapStaticZones = memo(function MinimapStaticZones() {
+  return (
+    <>
+      <rect
+        x={-MAP_HALF_SIZE}
+        y={-MAP_HALF_SIZE}
+        width={MAP_HALF_SIZE * 2}
+        height={MAP_HALF_SIZE * 2}
+        fill="#0f172a"
+        rx="2"
+      />
+      <rect x={-6} y={-MAP_HALF_SIZE} width={12} height={MAP_HALF_SIZE * 2} fill="#1e293b" opacity={0.6} />
+      <rect x={-MAP_HALF_SIZE} y={-6} width={MAP_HALF_SIZE * 2} height={12} fill="#1e293b" opacity={0.6} />
+      {ZONES.map((z) => (
+        <rect
+          key={z.id}
+          x={z.x - z.width / 2}
+          y={z.z - z.depth / 2}
+          width={z.width}
+          height={z.depth}
+          fill={z.color}
+          fillOpacity={0.62}
+          stroke="#94a3b8"
+          strokeWidth="0.6"
+          rx="1.5"
+        />
+      ))}
+      <circle cx={SECURITY_CAMS_POS.x} cy={SECURITY_CAMS_POS.z} r={1.45} fill="#fb7185" />
+      <circle cx={ADMIN_TABLE_POS.x} cy={ADMIN_TABLE_POS.z} r={1.45} fill="#38bdf8" />
+      <circle cx={VITALS_POS.x} cy={VITALS_POS.z} r={1.45} fill="#34d399" />
+    </>
+  );
+});
+
+const MinimapStaticLabels = memo(function MinimapStaticLabels() {
+  return (
+    <>
+      {ZONES.map((z) => (
+        <text
+          key={`${z.id}-lbl`}
+          x={z.x}
+          y={z.z - z.depth / 2 + 4.4}
+          textAnchor="middle"
+          fill="#f8fafc"
+          stroke="#090f1d"
+          strokeWidth="1.5"
+          paintOrder="stroke"
+          fontSize="4.1"
+          fontWeight="800"
+        >
+          {SHORT_ZONE_LABELS[z.id] ?? z.name}
+        </text>
+      ))}
+    </>
+  );
+});
 
 export function GameHud({
   snapshot,
@@ -552,13 +609,13 @@ export function GameHud({
                 <Zap className="w-4 h-4 text-amber-300 shrink-0" />
                 {snapshot.sabotage.active === 'loadshedding' ? (
                   <>
-                    <span className="sm:hidden">LOADSHEDDING!</span>
-                    <span className="hidden sm:inline">LOADSHEDDING! Fix DESCO</span>
+                    <span className="sm:hidden">BATTI GELO! DESCO JAO</span>
+                    <span className="hidden sm:inline">BATTI GELO! DESCO Fuse e Pani Dise!</span>
                   </>
                 ) : (
                   <>
-                    <span className="sm:hidden">WI-FI DOWN!</span>
-                    <span className="hidden sm:inline">WI-FI DOWN! Reset Dish</span>
+                    <span className="sm:hidden">WI-FI NAI! DISH JAO</span>
+                    <span className="hidden sm:inline">WI-FI NAI! TikTok Atke Gese — Dish Jao!</span>
                   </>
                 )}
               </span>
@@ -855,38 +912,9 @@ export function GameHud({
                 }
                 aria-hidden="true"
               >
-                <rect
-                  x={-MAP_HALF_SIZE}
-                  y={-MAP_HALF_SIZE}
-                  width={MAP_HALF_SIZE * 2}
-                  height={MAP_HALF_SIZE * 2}
-                  fill="#0f172a"
-                  rx="2"
-                />
-                <rect x={-6} y={-MAP_HALF_SIZE} width={12} height={MAP_HALF_SIZE * 2} fill="#1e293b" opacity={0.6} />
-                <rect x={-MAP_HALF_SIZE} y={-6} width={MAP_HALF_SIZE * 2} height={12} fill="#1e293b" opacity={0.6} />
-                {/* Layer 1: Zone Footprints */}
-                {ZONES.map((z) => (
-                  <rect
-                    key={z.id}
-                    x={z.x - z.width / 2}
-                    y={z.z - z.depth / 2}
-                    width={z.width}
-                    height={z.depth}
-                    fill={z.color}
-                    fillOpacity={0.62}
-                    stroke="#94a3b8"
-                    strokeWidth="0.6"
-                    rx="1.5"
-                  />
-                ))}
+                <MinimapStaticZones />
 
-                {/* Layer 2: Utility Station Markers (Cams, Admin, Vitals) */}
-                <circle cx={SECURITY_CAMS_POS.x} cy={SECURITY_CAMS_POS.z} r={1.45} fill="#fb7185" />
-                <circle cx={ADMIN_TABLE_POS.x} cy={ADMIN_TABLE_POS.z} r={1.45} fill="#38bdf8" />
-                <circle cx={VITALS_POS.x} cy={VITALS_POS.z} r={1.45} fill="#34d399" />
-
-                {/* Layer 3: Incomplete Task Markers */}
+                {/* Dynamic Incomplete Task Markers */}
                 {!isVondo &&
                   !isPagol &&
                   localPlayer.tasks
@@ -929,23 +957,7 @@ export function GameHud({
                   strokeWidth="0.85"
                 />
 
-                {/* Layer 4: Unobstructed Short Zone Labels (rendered above markers with dark stroke halo) */}
-                {ZONES.map((z) => (
-                  <text
-                    key={`${z.id}-lbl`}
-                    x={z.x}
-                    y={z.z - z.depth / 2 + 4.4}
-                    textAnchor="middle"
-                    fill="#f8fafc"
-                    stroke="#090f1d"
-                    strokeWidth="1.5"
-                    paintOrder="stroke"
-                    fontSize="4.1"
-                    fontWeight="800"
-                  >
-                    {SHORT_ZONE_LABELS[z.id] ?? z.name}
-                  </text>
-                ))}
+                <MinimapStaticLabels />
               </svg>
             </button>
           )}
@@ -1097,7 +1109,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={onFixSabotage}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
+                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
               >
                 <Wrench className="w-4 h-4" />
                 Fix Sabotage [E]
@@ -1108,7 +1120,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={() => onOpenTask(nearbyTask.id)}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
+                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
               >
                 <Wrench className="w-4 h-4" />
                 {nearbyTask.title} [E]
@@ -1119,7 +1131,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={() => onOpenStation('cams')}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 active:scale-95 transition-transform text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
               >
                 <Video className="w-4 h-4" />
                 CCTV [E]
@@ -1130,7 +1142,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={() => onOpenStation('admin')}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
               >
                 <Radar className="w-4 h-4" />
                 Admin Map [E]
@@ -1141,7 +1153,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={() => onOpenStation('vitals')}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
               >
                 <Activity className="w-4 h-4" />
                 Vitals [E]
@@ -1153,7 +1165,7 @@ export function GameHud({
                 type="button"
                 disabled={!canCallEmergency}
                 onClick={onEmergencyMeeting}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-45 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg font-mono-tabular"
+                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 active:scale-95 transition-transform disabled:opacity-45 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg font-mono-tabular"
               >
                 <Bell className="w-4 h-4" />
                 {localPlayer.emergencyMeetingsLeft <= 0
@@ -1168,7 +1180,7 @@ export function GameHud({
               <button
                 type="button"
                 onClick={() => onReportBody(nearbyBody.id)}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
+                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
               >
                 <Bell className="w-4 h-4" />
                 Haire! {nearbyBody.victimName} Size! [R]
@@ -1181,7 +1193,7 @@ export function GameHud({
                 type="button"
                 disabled={!inspectableBody}
                 onClick={() => onUseAbility()}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 active:scale-95 transition-transform disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 shadow-lg"
               >
                 <Search className="w-4 h-4" />
                 {inspectableBody ? `Inspect Clue [G]` : 'Clue [G]'}
@@ -1193,7 +1205,7 @@ export function GameHud({
                 type="button"
                 disabled={localPlayer.abilityCooldown > 0.05}
                 onClick={() => onUseAbility()}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 transition-transform disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <Shield className="w-4 h-4" />
                 {localPlayer.abilityCooldown > 0.05
@@ -1209,7 +1221,7 @@ export function GameHud({
                 type="button"
                 disabled={!darogaTarget || localPlayer.abilityCooldown > 0.05}
                 onClick={() => darogaTarget && onUseAbility(darogaTarget.id)}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-400 active:scale-95 transition-transform disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <Gavel className="w-4 h-4" />
                 {localPlayer.abilityCooldown > 0.05
@@ -1225,7 +1237,7 @@ export function GameHud({
                 type="button"
                 disabled={!revivableBody || (localPlayer.revivesLeft ?? 0) <= 0}
                 onClick={() => revivableBody && onUseAbility(revivableBody.id)}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-teal-400 hover:bg-teal-300 disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-teal-400 hover:bg-teal-300 active:scale-95 transition-transform disabled:opacity-35 text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <HeartPulse className="w-4 h-4" />
                 {(localPlayer.revivesLeft ?? 0) <= 0
@@ -1241,7 +1253,7 @@ export function GameHud({
                 type="button"
                 disabled={!cleanableBody || localPlayer.abilityCooldown > 0.05}
                 onClick={() => cleanableBody && onUseAbility(cleanableBody.id)}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 active:scale-95 transition-transform disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <Sparkle className="w-4 h-4" />
                 {localPlayer.abilityCooldown > 0.05
@@ -1264,7 +1276,7 @@ export function GameHud({
                     setShowDisguiseMenu((s) => !s);
                   }
                 }}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-fuchsia-600 hover:bg-fuchsia-500 active:scale-95 transition-transform disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <Sparkles className="w-4 h-4" />
                 {localPlayer.disguiseColor
@@ -1281,7 +1293,7 @@ export function GameHud({
                 type="button"
                 disabled={(!nearVent && !localPlayer.inVent) || !playerCanVent}
                 onClick={() => onVentToggle()}
-                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular"
+                className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 transition-transform disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
               >
                 <DoorOpen className="w-4 h-4" />
                 {localPlayer.specialRole === 'mistri' && !localPlayer.inVent && localPlayer.abilityCooldown > 0.05
@@ -1295,7 +1307,7 @@ export function GameHud({
                 <button
                   type="button"
                   onClick={() => setShowSabotageMenu((s) => !s)}
-                  className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular"
+                  className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 active:scale-95 transition-transform text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
                 >
                   <Zap className="w-4 h-4" />
                   {snapshot.sabotage.cooldownRemaining > 0
@@ -1307,7 +1319,7 @@ export function GameHud({
                   type="button"
                   disabled={!killTarget || localPlayer.killCooldownRemaining > 0.05}
                   onClick={() => killTarget && onKill(killTarget.id)}
-                  className="min-h-[48px] px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
+                  className="min-h-[48px] px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 active:scale-95 transition-transform disabled:opacity-35 text-white font-display font-bold text-xs sm:text-sm flex items-center gap-1.5 font-mono-tabular shadow-lg"
                 >
                   <Skull className="w-4 h-4" />
                   {localPlayer.killCooldownRemaining > 0.05

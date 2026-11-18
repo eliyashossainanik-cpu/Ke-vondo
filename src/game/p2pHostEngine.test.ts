@@ -85,3 +85,31 @@ test('P2P host room allows guest join by room code, bot fill, start match, and m
   assert.ok(movedGuest);
   assert.ok(Math.abs(movedGuest.x - 2) < 0.01);
 });
+
+test('P2P multiplayer auto-assigns unique names, distinct colors, and random roles on join/start', () => {
+  const engine = new P2PHostRoomEngine('M4M4A', {
+    sendToClient: () => {},
+    broadcast: () => {},
+  });
+
+  // Host + 2 guests all pass identical default name & color or blank names
+  engine.addClient('h1', 'Lal Mia', 'lal', true);
+  engine.handleMessage('g1', { type: 'room:join', roomCode: 'M4M4A', name: 'Lal Mia', color: 'lal' });
+  engine.handleMessage('g2', { type: 'room:join', roomCode: 'M4M4A', name: '', color: 'lal' });
+  engine.handleMessage('h1', { type: 'lobby:add_bot' });
+
+  const players = engine.getSnapshot().players;
+  assert.equal(players.length, 4);
+
+  const uniqueNames = new Set(players.map((p) => p.name));
+  const uniqueColors = new Set(players.map((p) => p.color));
+  assert.equal(uniqueNames.size, 4, 'every player should have a unique auto-selected name');
+  assert.equal(uniqueColors.size, 4, 'every player should have a unique auto-selected color');
+
+  // Starting match auto-assigns at least 1 Batpar and Para-basi roles
+  engine.handleMessage('h1', { type: 'lobby:start' });
+  const started = engine.getSnapshot();
+  assert.equal(started.phase, 'role_reveal');
+  assert.equal(started.players.filter((p) => p.role === 'vondo').length, 1);
+});
+
