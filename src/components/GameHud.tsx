@@ -9,6 +9,7 @@ import {
 import {
   ADMIN_TABLE_POS,
   EMERGENCY_BELL_POS,
+  GAS_LEAK_VALVES,
   MAP_HALF_SIZE,
   SECURITY_CAMS_POS,
   TASK_STATIONS,
@@ -26,6 +27,7 @@ import {
   canUseVent,
   findNearestCleanableBody,
   findNearestDarogaTarget,
+  findNearestGasValve,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
@@ -33,6 +35,8 @@ import {
   findNearestShieldTarget,
   getConnectedVents,
   getDirectionCompass,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
 } from '../shared/gameRules';
 import type { StationModalKind } from './StationModals';
 import { getQuickMemeList, soundEngine, type MemeSoundId } from '../audio/soundEngine';
@@ -101,7 +105,7 @@ export interface GameHudProps {
   onKill: (targetId: string) => void;
   onSabotage: (type: SabotageType) => void;
   onLockDoors: (zoneId: DoorZoneId) => void;
-  onFixSabotage: () => void;
+  onFixSabotageHold: (holding: boolean, valveId?: 'valve_cha' | 'valve_rickshaw') => void;
   onVentToggle: (destVentId?: string) => void;
   onUseAbility: (targetId?: string) => void;
   onPlayMeme: (memeId: MemeSoundId) => void;
@@ -211,7 +215,7 @@ export function GameHud({
   onKill,
   onSabotage,
   onLockDoors,
-  onFixSabotage,
+  onFixSabotageHold,
   onVentToggle,
   onUseAbility,
   onPlayMeme,
@@ -258,17 +262,20 @@ export function GameHud({
   const isVondo = localPlayer.role === 'vondo';
   const isPagol = localPlayer.specialRole === 'pagol';
   const taskEligible = canCompleteTasks(localPlayer);
+  const wifiHidden = snapshot.sabotage.active === 'wifi_down' && !isVondo;
   const specialMeta = SPECIAL_ROLES[localPlayer.specialRole];
   const currentZone = getZoneNameAt(localPlayer.x, localPlayer.z);
   const currentZoneDef = ZONES.find((z) => z.name === currentZone);
 
-  // Allow alive OR ghost Para-basi (non-Pagol) to complete remaining tasks!
-  const nearbyTask = taskEligible
-    ? TASK_STATIONS.find((st) => {
-        const hasUndone = localPlayer.tasks.some((t) => t.taskId === st.id && !t.completed);
-        return hasUndone && distance2D(localPlayer.x, localPlayer.z, st.x, st.z) <= st.radius;
-      })
-    : null;
+  // Alive OR ghost Para-basi (non-Pagol) complete real tasks; Batpar can open fake tasks for cover
+  const nearbyTask =
+    taskEligible || isVondo
+      ? TASK_STATIONS.find((st) => {
+          const hasUndone = localPlayer.tasks.some((t) => t.taskId === st.id && !t.completed);
+          return hasUndone && distance2D(localPlayer.x, localPlayer.z, st.x, st.z) <= st.radius;
+        }) ?? null
+      : null;
+  const nearbyTaskLocked = nearbyTask ? isTaskLockedBySabotage(nearbyTask.id, snapshot.sabotage) : false;
 
   const nearCams =
     localPlayer.alive &&
@@ -283,17 +290,24 @@ export function GameHud({
     distance2D(localPlayer.x, localPlayer.z, VITALS_POS.x, VITALS_POS.z) <= VITALS_POS.radius;
 
   const fixRange = localPlayer.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
-  const nearSabotageFix =
+  const nearGasValve =
+    snapshot.sabotage.active === 'gas_leak' && localPlayer.alive
+      ? findNearestGasValve(localPlayer.x, localPlayer.z, snapshot.sabotage, fixRange)
+      : null;
+  const nearSabotageFix = Boolean(
     snapshot.sabotage.active &&
-    localPlayer.alive &&
-    distance2D(
-      localPlayer.x,
-      localPlayer.z,
-      snapshot.sabotage.fixStationX,
-      snapshot.sabotage.fixStationZ,
-    ) <= fixRange;
+      localPlayer.alive &&
+      (snapshot.sabotage.active === 'gas_leak'
+        ? nearGasValve
+        : distance2D(
+            localPlayer.x,
+            localPlayer.z,
+            snapshot.sabotage.fixStationX,
+            snapshot.sabotage.fixStationZ,
+          ) <= fixRange),
+  );
 
-  const nearbyBody = findNearestReportableBody(localPlayer, snapshot.bodies);
+  const nearbyBody = findNearestReportableBody(localPlayer, snapshot.bodies, snapshot.doorLocks);
   const inspectableBody = findNearestInspectableBody(localPlayer, snapshot.bodies);
   const shieldTarget = findNearestShieldTarget(localPlayer, snapshot.players);
   const darogaTarget = findNearestDarogaTarget(localPlayer, snapshot.players);
@@ -302,7 +316,7 @@ export function GameHud({
 
   const nearBell =
     localPlayer.alive &&
-    !snapshot.sabotage.active &&
+    !isCriticalSabotage(snapshot.sabotage.active) &&
     distance2D(localPlayer.x, localPlayer.z, EMERGENCY_BELL_POS.x, EMERGENCY_BELL_POS.z) <=
       EMERGENCY_BELL_POS.interactRadius;
 
@@ -333,29 +347,50 @@ export function GameHud({
     : { currentVent: null, targets: [] };
 
   // Compute nearest incomplete task or active sabotage compass bearing
-  const nextTaskStation = taskEligible
-    ? localPlayer.tasks
-        .filter((t) => !t.completed)
-        .map((t) => TASK_STATIONS.find((s) => s.id === t.taskId))
-        .filter((s): s is NonNullable<typeof s> => Boolean(s))
-        .sort(
-          (a, b) =>
-            distance2D(localPlayer.x, localPlayer.z, a.x, a.z) -
-            distance2D(localPlayer.x, localPlayer.z, b.x, b.z),
-        )[0] ?? null
-    : null;
+  const nextTaskStation =
+    (taskEligible || isVondo) && !wifiHidden
+      ? localPlayer.tasks
+          .filter((t) => !t.completed)
+          .map((t) => TASK_STATIONS.find((s) => s.id === t.taskId))
+          .filter((s): s is NonNullable<typeof s> => Boolean(s))
+          .sort(
+            (a, b) =>
+              distance2D(localPlayer.x, localPlayer.z, a.x, a.z) -
+              distance2D(localPlayer.x, localPlayer.z, b.x, b.z),
+          )[0] ?? null
+      : null;
+
+  const nearestTargetValve =
+    snapshot.sabotage.active === 'gas_leak'
+      ? [...snapshot.sabotage.valves].sort((a, b) => {
+          const aScore = (a.holderId ? 100 : 0) + distance2D(localPlayer.x, localPlayer.z, a.x, a.z);
+          const bScore = (b.holderId ? 100 : 0) + distance2D(localPlayer.x, localPlayer.z, b.x, b.z);
+          return aScore - bScore;
+        })[0] ?? GAS_LEAK_VALVES[0]
+      : null;
 
   const activeCompass = snapshot.sabotage.active
-    ? {
-        urgent: true,
-        label: snapshot.sabotage.active === 'loadshedding' ? 'DESCO Breaker' : 'Dish Hub',
-        ...getDirectionCompass(
-          localPlayer.x,
-          localPlayer.z,
-          snapshot.sabotage.fixStationX,
-          snapshot.sabotage.fixStationZ,
-        ),
-      }
+    ? snapshot.sabotage.active === 'gas_leak' && nearestTargetValve
+      ? {
+          urgent: true,
+          label: nearestTargetValve.label,
+          ...getDirectionCompass(
+            localPlayer.x,
+            localPlayer.z,
+            nearestTargetValve.x,
+            nearestTargetValve.z,
+          ),
+        }
+      : {
+          urgent: true,
+          label: snapshot.sabotage.active === 'loadshedding' ? 'DESCO Breaker' : 'Dish Hub',
+          ...getDirectionCompass(
+            localPlayer.x,
+            localPlayer.z,
+            snapshot.sabotage.fixStationX,
+            snapshot.sabotage.fixStationZ,
+          ),
+        }
     : nextTaskStation
       ? {
           urgent: false,
@@ -422,6 +457,22 @@ export function GameHud({
             </div>
           )}
 
+        {/* Ghost Mode Status Banner when dead */}
+        {!localPlayer.alive && (
+          <div
+            role="status"
+            aria-label="Ghost Mode Active"
+            className="self-center pointer-events-none flex items-center gap-2 rounded-xl px-3 py-1 border border-sky-400/50 shadow-lg bg-slate-950/90 text-[11px] sm:text-xs font-bold text-sky-200 max-w-[95vw] text-center"
+          >
+            <span className="text-sky-300 font-display tracking-wide">GHOST MODE</span>
+            <span className="text-slate-300 font-semibold truncate">
+              {taskEligible
+                ? 'Tumi Adrishyo! Alive keu tomake dekhbe na — deyal bhed kore Tasks sesh koro!'
+                : 'Tumi Adrishyo! Alive keu tomake dekhbe na — ghoraghuri kore match dekho!'}
+            </span>
+          </div>
+        )}
+
         {/* Top Row: Left Task/Role Cluster & Right Utility/Minimap Cluster */}
         <div className="flex items-start justify-between gap-2 sm:gap-4">
         {/* Top-Left Cluster */}
@@ -439,13 +490,17 @@ export function GameHud({
             <div className="flex items-center justify-between text-xs font-semibold mb-1.5">
               <span className="text-slate-300">Para Tasks</span>
               <span className="font-mono-tabular text-amber-300">
-                {snapshot.completedTasks}/{snapshot.totalTasks} · {taskPct}%
+                {wifiHidden
+                  ? 'Wi-Fi Nai!'
+                  : `${snapshot.completedTasks}/${snapshot.totalTasks} · ${taskPct}%`}
               </span>
             </div>
             <div className="w-full h-2 sm:h-2.5 rounded-full bg-slate-800 overflow-hidden">
               <div
-                className="h-full bg-emerald-400 transition-all duration-300"
-                style={{ width: `${taskPct}%` }}
+                className={`h-full transition-all duration-300 ${
+                  wifiHidden ? 'bg-indigo-500/70 animate-pulse' : 'bg-emerald-400'
+                }`}
+                style={{ width: wifiHidden ? '100%' : `${taskPct}%` }}
               />
             </div>
 
@@ -513,7 +568,7 @@ export function GameHud({
             )}
           </div>
 
-          {/* Assigned Task List (Desktop expanded; Mobile/Landscape compact collapsible pill so joystick stays unobstructed) */}
+          {/* Assigned Task List (hidden during wifi_down for crew; Batpar sees Fake Task Cover) */}
           {isPagol ? (
             !isLandscapeCompact && (
               <div
@@ -526,102 +581,146 @@ export function GameHud({
                 Shondhojonok ghuraghuri koro ar Shalish e nijeke Pukur e chubani khawao!
               </div>
             )
-          ) : (
-            !isVondo &&
-            (isLandscapeCompact || isNarrowMobile ? (
-              <div className="pointer-events-auto">
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    setMobileTasksExpanded((v) => !v);
-                  }}
-                  className="px-2.5 py-1 rounded-lg border border-white/12 text-[11px] font-semibold text-slate-200 flex items-center gap-1.5 shadow"
-                  style={{ backgroundColor: 'rgba(10, 15, 28, 0.84)' }}
-                >
-                  <span>
-                    Tasks ({localPlayer.tasks.filter((t) => t.completed).length}/{localPlayer.tasks.length})
-                  </span>
-                  {mobileTasksExpanded ? (
-                    <ChevronUp className="w-3 h-3 text-amber-300" />
-                  ) : (
-                    <ChevronDown className="w-3 h-3 text-amber-300" />
-                  )}
-                </button>
-                {mobileTasksExpanded && (
-                  <div
-                    className="mt-1 rounded-xl px-2.5 py-2 border border-white/15 shadow-lg text-[11px] space-y-1 max-h-[120px] overflow-y-auto"
-                    style={{ backgroundColor: 'rgba(10, 15, 28, 0.94)' }}
-                  >
-                    {localPlayer.tasks.map((t) => {
-                      const st = TASK_STATIONS.find((s) => s.id === t.taskId);
-                      if (!st) return null;
-                      return (
-                        <div
-                          key={t.taskId}
-                          className={`flex items-center justify-between gap-2 ${
-                            t.completed
-                              ? 'text-emerald-400 line-through opacity-75'
-                              : 'text-slate-100 font-medium'
-                          }`}
-                        >
-                          <span className="truncate">{st.title}</span>
-                          <span className="text-[10px] text-slate-300 shrink-0">{st.zoneName}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div
-                className="rounded-xl px-3.5 py-2.5 border border-white/15 shadow-lg text-xs space-y-1"
-                style={{ backgroundColor: 'rgba(10, 15, 28, 0.92)' }}
+          ) : wifiHidden ? (
+            <div
+              className="rounded-xl px-3 py-2 border border-indigo-400/50 shadow-lg text-[11px] font-semibold text-indigo-200"
+              style={{ backgroundColor: 'rgba(30, 27, 75, 0.92)' }}
+            >
+              Wi-Fi Nai! Task List &amp; Bar Gayeb — Dish Hub e giye thik koro!
+            </div>
+          ) : isLandscapeCompact || isNarrowMobile ? (
+            <div className="pointer-events-auto">
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setMobileTasksExpanded((v) => !v);
+                }}
+                className="px-2.5 py-1 rounded-lg border border-white/12 text-[11px] font-semibold text-slate-200 flex items-center gap-1.5 shadow"
+                style={{ backgroundColor: 'rgba(10, 15, 28, 0.84)' }}
               >
-                {localPlayer.tasks.map((t) => {
-                  const st = TASK_STATIONS.find((s) => s.id === t.taskId);
-                  if (!st) return null;
-                  return (
-                    <div
-                      key={t.taskId}
-                      className={`flex items-center justify-between gap-2 ${
-                        t.completed ? 'text-emerald-400 line-through opacity-75' : 'text-slate-100 font-medium'
-                      }`}
-                    >
-                      <span className="truncate">{st.title}</span>
-                      <span className="text-[11px] text-slate-300 shrink-0">{st.zoneName}</span>
+                <span>
+                  {isVondo ? 'Fake Tasks' : 'Tasks'} (
+                  {localPlayer.tasks.filter((t) => t.completed).length}/{localPlayer.tasks.length})
+                </span>
+                {mobileTasksExpanded ? (
+                  <ChevronUp className="w-3 h-3 text-amber-300" />
+                ) : (
+                  <ChevronDown className="w-3 h-3 text-amber-300" />
+                )}
+              </button>
+              {mobileTasksExpanded && (
+                <div
+                  className="mt-1 rounded-xl px-2.5 py-2 border border-white/15 shadow-lg text-[11px] space-y-1 max-h-[120px] overflow-y-auto"
+                  style={{ backgroundColor: 'rgba(10, 15, 28, 0.94)' }}
+                >
+                  {isVondo && (
+                    <div className="text-[10px] font-bold text-rose-300 pb-0.5 border-b border-slate-800">
+                      Fake Task Cover (0% Team Progress)
                     </div>
-                  );
-                })}
-              </div>
-            ))
+                  )}
+                  {localPlayer.tasks.map((t) => {
+                    const st = TASK_STATIONS.find((s) => s.id === t.taskId);
+                    if (!st) return null;
+                    return (
+                      <div
+                        key={t.taskId}
+                        className={`flex items-center justify-between gap-2 ${
+                          t.completed
+                            ? 'text-emerald-400 line-through opacity-75'
+                            : 'text-slate-100 font-medium'
+                        }`}
+                      >
+                        <span className="truncate">{st.title}</span>
+                        <span className="text-[10px] text-slate-300 shrink-0">{st.zoneName}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              className="rounded-xl px-3.5 py-2.5 border border-white/15 shadow-lg text-xs space-y-1"
+              style={{ backgroundColor: 'rgba(10, 15, 28, 0.92)' }}
+            >
+              {isVondo && (
+                <div className="text-[11px] font-bold text-rose-300 pb-1 border-b border-slate-800">
+                  Fake Task Cover (0% Team Progress)
+                </div>
+              )}
+              {localPlayer.tasks.map((t) => {
+                const st = TASK_STATIONS.find((s) => s.id === t.taskId);
+                if (!st) return null;
+                return (
+                  <div
+                    key={t.taskId}
+                    className={`flex items-center justify-between gap-2 ${
+                      t.completed ? 'text-emerald-400 line-through opacity-75' : 'text-slate-100 font-medium'
+                    }`}
+                  >
+                    <span className="truncate">{st.title}</span>
+                    <span className="text-[11px] text-slate-300 shrink-0">{st.zoneName}</span>
+                  </div>
+                );
+              })}
+            </div>
           )}
 
           {/* Active Sabotage Alert */}
           {snapshot.sabotage.active && (
             <div
               role="alert"
-              className="rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 border border-rose-500/60 text-[11px] sm:text-xs font-bold text-rose-100 flex items-center justify-between gap-2"
-              style={{ backgroundColor: 'rgba(127, 29, 29, 0.92)' }}
+              className={`rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 border text-[11px] sm:text-xs font-bold flex flex-col gap-1 ${
+                isCriticalSabotage(snapshot.sabotage.active)
+                  ? 'border-rose-400 text-rose-100 animate-pulse'
+                  : snapshot.sabotage.active === 'loadshedding'
+                    ? 'border-amber-400/60 text-amber-100'
+                    : 'border-indigo-400/60 text-indigo-100'
+              }`}
+              style={{
+                backgroundColor: isCriticalSabotage(snapshot.sabotage.active)
+                  ? 'rgba(153, 27, 27, 0.94)'
+                  : 'rgba(30, 41, 59, 0.92)',
+              }}
             >
-              <span className="flex items-center gap-1.5 truncate">
-                <Zap className="w-4 h-4 text-amber-300 shrink-0" />
-                {snapshot.sabotage.active === 'loadshedding' ? (
-                  <>
-                    <span className="sm:hidden">BATTI GELO! DESCO JAO</span>
-                    <span className="hidden sm:inline">BATTI GELO! DESCO Fuse e Pani Dise!</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="sm:hidden">WI-FI NAI! DISH JAO</span>
-                    <span className="hidden sm:inline">WI-FI NAI! TikTok Atke Gese — Dish Jao!</span>
-                  </>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 truncate">
+                  <Zap className="w-4 h-4 text-amber-300 shrink-0" />
+                  {snapshot.sabotage.active === 'gas_leak' ? (
+                    <span>CRITICAL: GAS PHUTCHE! 2 Valve Hold Koro!</span>
+                  ) : snapshot.sabotage.active === 'loadshedding' ? (
+                    <span>BATTI GELO! DESCO Hold-E 3s (Auto {Math.ceil(snapshot.sabotage.timeRemaining)}s)</span>
+                  ) : (
+                    <span>WI-FI NAI! Dish Hold-E 3s (Auto {Math.ceil(snapshot.sabotage.timeRemaining)}s)</span>
+                  )}
+                </span>
+                {isCriticalSabotage(snapshot.sabotage.active) && (
+                  <span className="font-mono-tabular text-amber-300 shrink-0 text-sm">
+                    {Math.ceil(snapshot.sabotage.timeRemaining)}s
+                  </span>
                 )}
-              </span>
-              <span className="font-mono-tabular text-amber-300 shrink-0">
-                {Math.ceil(snapshot.sabotage.timeRemaining)}s
-              </span>
+              </div>
+              {snapshot.sabotage.active === 'gas_leak' && (
+                <div className="flex items-center justify-between gap-2 text-[10px] font-mono-tabular text-amber-200">
+                  {snapshot.sabotage.valves.map((v) => (
+                    <span
+                      key={v.id}
+                      className={`px-1.5 py-0.5 rounded ${
+                        v.holderId ? 'bg-emerald-600/80 text-white' : 'bg-slate-900/70 text-rose-200'
+                      }`}
+                    >
+                      {v.id === 'valve_cha' ? 'Cha Dokan' : 'Garage'}: {v.holderId ? 'HELD' : 'OPEN'}
+                    </span>
+                  ))}
+                  {snapshot.sabotage.fixProgress > 0 && (
+                    <span className="text-emerald-300">
+                      {Math.round(snapshot.sabotage.fixProgress * 100)}%
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -914,9 +1013,10 @@ export function GameHud({
               >
                 <MinimapStaticZones />
 
-                {/* Dynamic Incomplete Task Markers */}
+                {/* Dynamic Incomplete Task Markers (hidden during wifi_down for crew) */}
                 {!isVondo &&
                   !isPagol &&
+                  !wifiHidden &&
                   localPlayer.tasks
                     .filter((t) => !t.completed)
                     .map((t) => {
@@ -935,8 +1035,20 @@ export function GameHud({
                       );
                     })}
 
-                {/* Sabotage Marker */}
-                {snapshot.sabotage.active && (
+                {/* Sabotage Marker(s) */}
+                {snapshot.sabotage.active === 'gas_leak' ? (
+                  snapshot.sabotage.valves.map((v) => (
+                    <circle
+                      key={v.id}
+                      cx={v.x}
+                      cy={v.z}
+                      r={2.5}
+                      fill={v.holderId ? '#10b981' : '#ef4444'}
+                      stroke="#ffffff"
+                      strokeWidth="0.8"
+                    />
+                  ))
+                ) : snapshot.sabotage.active ? (
                   <circle
                     cx={snapshot.sabotage.fixStationX}
                     cy={snapshot.sabotage.fixStationZ}
@@ -945,7 +1057,7 @@ export function GameHud({
                     stroke="#ffffff"
                     strokeWidth="0.8"
                   />
-                )}
+                ) : null}
 
                 {/* Local Player Marker */}
                 <circle
@@ -1036,12 +1148,23 @@ export function GameHud({
                   type="button"
                   disabled={Boolean(snapshot.sabotage.active) || snapshot.sabotage.cooldownRemaining > 0}
                   onClick={() => {
+                    onSabotage('gas_leak');
+                    setShowSabotageMenu(false);
+                  }}
+                  className="min-h-[42px] px-3 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-xs font-bold text-white"
+                >
+                  Gas Leak! (CRITICAL 45s)
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(snapshot.sabotage.active) || snapshot.sabotage.cooldownRemaining > 0}
+                  onClick={() => {
                     onSabotage('loadshedding');
                     setShowSabotageMenu(false);
                   }}
-                  className="min-h-[42px] px-3 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs font-bold text-white"
+                  className="min-h-[42px] px-3 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 disabled:opacity-40 text-xs font-bold text-white"
                 >
-                  Current Khao! (Loadshedding)
+                  Current Khao! (90s Dark)
                 </button>
                 <button
                   type="button"
@@ -1108,22 +1231,36 @@ export function GameHud({
             {nearSabotageFix && (
               <button
                 type="button"
-                onClick={onFixSabotage}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
+                onPointerDown={() => onFixSabotageHold(true, nearGasValve?.id)}
+                onPointerUp={() => onFixSabotageHold(false)}
+                onPointerLeave={() => onFixSabotageHold(false)}
+                onPointerCancel={() => onFixSabotageHold(false)}
+                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg font-mono-tabular select-none"
               >
                 <Wrench className="w-4 h-4" />
-                Fix Sabotage [E]
+                {nearGasValve
+                  ? `Hold Valve (${Math.round(snapshot.sabotage.fixProgress * 100)}%) [Hold E]`
+                  : `Hold to Fix (${Math.round(snapshot.sabotage.fixProgress * 100)}%) [Hold E]`}
               </button>
             )}
 
             {nearbyTask && (
               <button
                 type="button"
-                onClick={() => onOpenTask(nearbyTask.id)}
-                className="min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 active:scale-95 transition-transform text-slate-950 font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg"
+                disabled={nearbyTaskLocked}
+                onClick={() => !nearbyTaskLocked && onOpenTask(nearbyTask.id)}
+                className={`min-h-[48px] px-4 py-2.5 rounded-xl font-display font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg transition-transform ${
+                  nearbyTaskLocked
+                    ? 'bg-indigo-900/90 text-indigo-200 border border-indigo-400/40 cursor-not-allowed'
+                    : 'bg-amber-400 hover:bg-amber-300 active:scale-95 text-slate-950'
+                }`}
               >
                 <Wrench className="w-4 h-4" />
-                {nearbyTask.title} [E]
+                {nearbyTaskLocked
+                  ? `${nearbyTask.title} (Wi-Fi Nai!)`
+                  : isVondo
+                    ? `Fake: ${nearbyTask.title} [E]`
+                    : `${nearbyTask.title} [E]`}
               </button>
             )}
 

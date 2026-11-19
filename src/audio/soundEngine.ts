@@ -539,25 +539,138 @@ class SoundEngine {
     osc.stop(t + 0.065);
   }
 
-  public playRoleReveal(isBatpar: boolean): void {
-    if (isBatpar) {
-      this.playDunDunDun();
-      return;
-    }
+  public playCardTick(): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
     const t = ctx.currentTime;
-    [340, 510, 680].forEach((f, idx) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(920, t);
+    osc.frequency.exponentialRampToValueAtTime(360, t + 0.032);
+    gain.gain.setValueAtTime(0.065, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.036);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.04);
+  }
+
+  public playShhhhSound(isBatpar: boolean, isPagol = false): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+
+    // Sharp initial "Sh" consonant transient
+    const clickSrc = ctx.createBufferSource();
+    clickSrc.buffer = this.getNoiseBuffer(ctx);
+    const clickHp = ctx.createBiquadFilter();
+    clickHp.type = 'highpass';
+    clickHp.frequency.setValueAtTime(3200, t);
+    const clickGain = ctx.createGain();
+    clickGain.gain.setValueAtTime(0.001, t);
+    clickGain.gain.linearRampToValueAtTime(0.24, t + 0.015);
+    clickGain.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
+    clickSrc.connect(clickHp).connect(clickGain).connect(ctx.destination);
+    clickSrc.start(t);
+    clickSrc.stop(t + 0.08);
+
+    // Sustained breathy "SHHHHH!" sibilant sweep
+    const shhSrc = ctx.createBufferSource();
+    shhSrc.buffer = this.getNoiseBuffer(ctx);
+    const shhFilter = ctx.createBiquadFilter();
+    shhFilter.type = 'bandpass';
+    shhFilter.frequency.setValueAtTime(2400, t);
+    shhFilter.frequency.linearRampToValueAtTime(3400, t + 0.16);
+    shhFilter.frequency.exponentialRampToValueAtTime(1650, t + 0.7);
+    shhFilter.Q.value = 3.0;
+    const shhGain = ctx.createGain();
+    shhGain.gain.setValueAtTime(0.001, t);
+    shhGain.gain.linearRampToValueAtTime(0.28, t + 0.06);
+    shhGain.gain.setValueAtTime(0.24, t + 0.28);
+    shhGain.gain.exponentialRampToValueAtTime(0.001, t + 0.72);
+    shhSrc.connect(shhFilter).connect(shhGain).connect(ctx.destination);
+    shhSrc.start(t);
+    shhSrc.stop(t + 0.74);
+
+    // Dramatic Super Sus role reveal sting right under the tail of "Shhhhh!"
+    if (isBatpar) {
+      [
+        { f: 146.83, delay: 0.24, dur: 0.45 },
+        { f: 155.56, delay: 0.36, dur: 0.55 },
+        { f: 110.0, delay: 0.48, dur: 0.75 },
+      ].forEach((n) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(n.f, t + n.delay);
+        gain.gain.setValueAtTime(0.001, t + n.delay);
+        gain.gain.linearRampToValueAtTime(0.14, t + n.delay + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + n.delay + n.dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t + n.delay);
+        osc.stop(t + n.delay + n.dur + 0.02);
+      });
+    } else if (isPagol) {
+      [392, 493.88, 622.25, 783.99].forEach((f, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(f, t + 0.24 + idx * 0.07);
+        gain.gain.setValueAtTime(0.11, t + 0.24 + idx * 0.07);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24 + idx * 0.07 + 0.35);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t + 0.24 + idx * 0.07);
+        osc.stop(t + 0.24 + idx * 0.07 + 0.37);
+      });
+    } else {
+      [392.0, 493.88, 587.33, 783.99].forEach((f, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(f, t + 0.24 + idx * 0.07);
+        gain.gain.setValueAtTime(0.11, t + 0.24 + idx * 0.07);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24 + idx * 0.07 + 0.42);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t + 0.24 + idx * 0.07);
+        osc.stop(t + 0.24 + idx * 0.07 + 0.44);
+      });
+    }
+  }
+
+  public playRoleReveal(isBatpar: boolean): void {
+    this.playShhhhSound(isBatpar, false);
+  }
+
+  public playEjectBuildup(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    // "1... 2... 3..." crowd drum taps
+    [180, 225, 285].forEach((freq, idx) => {
+      const start = t + idx * 0.44;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(f, t + idx * 0.09);
-      gain.gain.setValueAtTime(0.12, t + idx * 0.09);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.09 + 0.28);
+      osc.frequency.setValueAtTime(freq, start);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.55, start + 0.14);
+      gain.gain.setValueAtTime(0.15, start);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.16);
       osc.connect(gain).connect(ctx.destination);
-      osc.start(t + idx * 0.09);
-      osc.stop(t + idx * 0.09 + 0.3);
+      osc.start(start);
+      osc.stop(start + 0.17);
     });
+    // Rising throw whistle right before pond flight
+    const whoosh = ctx.createOscillator();
+    const wGain = ctx.createGain();
+    whoosh.type = 'sine';
+    whoosh.frequency.setValueAtTime(240, t + 1.38);
+    whoosh.frequency.exponentialRampToValueAtTime(920, t + 2.05);
+    wGain.gain.setValueAtTime(0.001, t + 1.38);
+    wGain.gain.linearRampToValueAtTime(0.12, t + 1.55);
+    wGain.gain.exponentialRampToValueAtTime(0.001, t + 2.15);
+    whoosh.connect(wGain).connect(ctx.destination);
+    whoosh.start(t + 1.38);
+    whoosh.stop(t + 2.18);
   }
 
   public playDoorSlam(): void {
@@ -835,6 +948,87 @@ class SoundEngine {
     osc.connect(gain).connect(ctx.destination);
     osc.start(t);
     osc.stop(t + 0.1);
+  }
+
+  public playLobbyJoin(leaving = false): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const notes = leaving ? [540, 390] : [440, 660];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t + idx * 0.055);
+      gain.gain.setValueAtTime(0.085, t + idx * 0.055);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.055 + 0.11);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t + idx * 0.055);
+      osc.stop(t + idx * 0.055 + 0.12);
+    });
+  }
+
+  public playLobbyReady(ready = true): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(ready ? 620 : 420, t);
+    osc.frequency.exponentialRampToValueAtTime(ready ? 920 : 310, t + 0.07);
+    gain.gain.setValueAtTime(0.11, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.1);
+  }
+
+  public playLobbyTick(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.exponentialRampToValueAtTime(660, t + 0.05);
+    gain.gain.setValueAtTime(0.1, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.08);
+  }
+
+  public playStartWhoosh(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(360, t);
+    filter.frequency.exponentialRampToValueAtTime(2400, t + 0.28);
+    filter.Q.value = 1.4;
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, t);
+    nGain.gain.linearRampToValueAtTime(0.22, t + 0.08);
+    nGain.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+    src.connect(filter).connect(nGain).connect(ctx.destination);
+    src.start(t);
+    src.stop(t + 0.4);
+
+    const osc = ctx.createOscillator();
+    const oGain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(220, t);
+    osc.frequency.exponentialRampToValueAtTime(660, t + 0.22);
+    oGain.gain.setValueAtTime(0.14, t);
+    oGain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+    osc.connect(oGain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.3);
   }
 
   public playOutcome(win: boolean): void {

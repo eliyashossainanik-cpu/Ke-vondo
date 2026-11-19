@@ -72,8 +72,8 @@ export function GuideModal({ onClose }: GuideModalProps) {
                 Batpar (Impostors) Win If:
               </h3>
               <ul className="space-y-1 text-xs text-slate-300 list-disc pl-4">
-                <li>Eliminate enough Para-basi to equal or outnumber living neighbors.</li>
-                <li>Or run out the clock on Loadshedding (DESCO) / Wi-Fi Down (Dish Hub).</li>
+                <li>Eliminate enough Para-basi to equal or outnumber ALL living non-Batpars (incl. Neutrals).</li>
+                <li>Or trigger a CRITICAL Gas Leak (45s) unless 2 players hold both valves together. (Loadshedding &amp; Wi-Fi never end the game!)</li>
               </ul>
             </div>
           </section>

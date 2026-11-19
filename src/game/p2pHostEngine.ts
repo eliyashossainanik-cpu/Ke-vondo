@@ -7,6 +7,7 @@ import {
   type FootprintDot,
   type PlayerColorId,
   type PlayerState,
+  type PublicRoomSummary,
   type RoomSettings,
   type RoomSnapshot,
   type ServerMessage,
@@ -14,14 +15,15 @@ import {
 import {
   BOT_WAYPOINTS,
   EMERGENCY_BELL_POS,
+  GAS_LEAK_VALVES,
   PLAYER_RADIUS,
-  SABOTAGE_TARGETS,
   SPAWN_RING,
   TASK_STATIONS,
   VENTS,
   WALLS,
   distance2D,
   getZoneNameAt,
+  hasLineOfSight,
   resolveCircleWallCollision,
 } from '../shared/mapData';
 import {
@@ -31,23 +33,30 @@ import {
   DEFAULT_ROOM_SETTINGS,
   DOOR_LOCK_COOLDOWN_SEC,
   DOOR_LOCK_DURATION_SEC,
+  INITIAL_KILL_COOLDOWN_SEC,
   JHARUDAR_CLEAN_COOLDOWN_SEC,
   KOBIRAJ_COOLDOWN_SEC,
   MISTRI_FIX_RANGE,
   MISTRI_VENT_COOLDOWN_SEC,
+  REPORT_RANGE,
   SABOTAGE_COOLDOWN_SEC,
-  SABOTAGE_DURATION_SEC,
   SABOTAGE_FIX_RANGE,
+  SABOTAGE_INITIAL_LOCKOUT_SEC,
   VENT_RANGE,
+  advanceSabotageState,
+  assignMatchTasks,
   assignRoles,
   assignSpecialRoles,
+  canCompleteTasks,
   canExecuteKill,
   canUseVent,
   computeTaskProgress,
-  createPlayerTasks,
+  createEmptySabotageState,
+  createSabotageState,
   evaluateMatchOutcome,
   findNearestCleanableBody,
   findNearestDarogaTarget,
+  findNearestGasValve,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
@@ -55,6 +64,10 @@ import {
   findNearestShieldTarget,
   getColorShadeHint,
   inspectBodyClue,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
+  makeDefaultPlayerState,
+  makeEmptyDoorLocks,
   resolveDarogaShot,
   resolveVentHopTarget,
   tallyVotes,
@@ -122,16 +135,6 @@ export interface P2PHostTransport {
   broadcast: (msg: ServerMessage) => void;
 }
 
-function makeEmptyDoorLocks(): DoorLockState {
-  return {
-    cha_dokan: 0,
-    rickshaw_garage: 0,
-    desco_power: 0,
-    dish_roof: 0,
-    cooldownRemaining: 0,
-  };
-}
-
 /**
  * Host-authoritative multiplayer room engine for zero-backend Room Code play
  * (used automatically on static hosting like Cloudflare Pages when no `/ws` server exists).
@@ -144,25 +147,25 @@ export class P2PHostRoomEngine {
   private playerToClient = new Map<string, string>();
   private botMemories = new Map<string, BotMemory>();
   private footprintAccum = new Map<string, number>();
+  private holdingFixMap = new Map<string, { valveId?: 'valve_cha' | 'valve_rickshaw' }>();
   private bodies: BodyMarker[] = [];
   private footprints: FootprintDot[] = [];
-  private sabotage: RoomSnapshot['sabotage'] = {
-    active: null,
-    timeRemaining: 0,
-    fixStationX: 0,
-    fixStationZ: 0,
-    cooldownRemaining: 0,
-  };
+  private sabotage: RoomSnapshot['sabotage'] = createEmptySabotageState(SABOTAGE_INITIAL_LOCKOUT_SEC);
   private doorLocks: DoorLockState = makeEmptyDoorLocks();
   private chat: ChatMessage[] = [];
+  private lobbyChat: ChatMessage[] = [];
+  private lobbyCountdownSec: number | null = null;
   private meetingCallerId: string | null = null;
   private meetingReason: 'body' | 'emergency' | null = null;
   private meetingTimer = 0;
+  private discussionTimer = 0;
   private phaseTimer = 0;
   private emergencyCooldownRemaining = 0;
   private ejection: RoomSnapshot['ejection'] = null;
   private justEjectedPlayer: PlayerState | null = null;
   private outcome: RoomSnapshot['outcome'] = null;
+  private netaRevealedId: string | null = null;
+  private prankedLampUntil = 0;
   private settings: RoomSettings = { ...DEFAULT_ROOM_SETTINGS };
   private transport: P2PHostTransport;
 
@@ -176,16 +179,23 @@ export class P2PHostRoomEngine {
     const taskStats = computeTaskProgress(players);
     return {
       roomCode: this.roomCode,
+      isSolo: false,
       phase: this.phase,
       players: players.map((p) => ({ ...p, tasks: p.tasks.map((t) => ({ ...t })) })),
       bodies: this.bodies.map((b) => ({ ...b })),
       footprints: this.footprints.map((f) => ({ ...f })),
-      sabotage: { ...this.sabotage },
+      sabotage: {
+        ...this.sabotage,
+        valves: this.sabotage.valves.map((v) => ({ ...v })),
+      },
       doorLocks: { ...this.doorLocks },
       chat: this.chat.slice(-40),
+      lobbyChat: this.lobbyChat.slice(-40),
+      lobbyCountdownSec: this.lobbyCountdownSec,
       meetingCallerId: this.meetingCallerId,
       meetingReason: this.meetingReason,
       meetingTimer: Math.max(0, Math.ceil(this.meetingTimer)),
+      discussionTimer: Math.max(0, Math.ceil(this.discussionTimer)),
       emergencyCooldownRemaining: Math.max(0, Math.ceil(this.emergencyCooldownRemaining)),
       ejection: this.ejection,
       outcome: this.outcome,
@@ -193,6 +203,24 @@ export class P2PHostRoomEngine {
       taskProgress: taskStats.progress,
       totalTasks: taskStats.totalTasks,
       completedTasks: taskStats.completedTasks,
+      netaRevealedId: this.netaRevealedId,
+      prankedLampUntil: this.prankedLampUntil,
+    };
+  }
+
+  public hasHumanClients(): boolean {
+    return this.clientToPlayer.size > 0;
+  }
+
+  public getRoomSummary(): PublicRoomSummary {
+    const players = Array.from(this.players.values());
+    const host = players.find((p) => p.isHost) ?? players.find((p) => !p.isBot) ?? players[0];
+    return {
+      roomCode: this.roomCode,
+      hostName: host?.name ?? 'Host',
+      playerCount: players.length,
+      maxPlayers: MAX_PLAYERS,
+      phase: this.phase,
     };
   }
 
@@ -276,35 +304,18 @@ export class P2PHostRoomEngine {
       Array.from(this.players.values()),
     );
 
-    const player: PlayerState = {
+    const player: PlayerState = makeDefaultPlayerState({
       id: playerId,
-      name: resolvedIdentity.name,
+      name: resolvedIdentity.name.slice(0, 12),
       color: resolvedIdentity.color,
       x: sp.x,
       z: sp.z,
-      vx: 0,
-      vz: 0,
       yaw: sp.yaw,
-      role: 'parabasi',
-      specialRole: 'none',
-      alive: true,
-      inVent: false,
-      watchingCams: false,
-      visualTaskTimer: 0,
-      abilityCooldown: 0,
-      shielded: false,
-      disguiseColor: null,
-      disguiseName: null,
-      disguiseTimer: 0,
       isBot: false,
       isHost,
-      tasks: [],
-      killCooldownRemaining: 0,
+      ready: isHost,
       emergencyMeetingsLeft: this.settings.emergencyMeetingsPerPlayer,
-      revivesLeft: 0,
-      votedFor: null,
-      hasVoted: false,
-    };
+    });
 
     this.players.set(playerId, player);
     this.clientToPlayer.set(clientId, playerId);
@@ -323,9 +334,20 @@ export class P2PHostRoomEngine {
   public removeClient(clientId: string): void {
     const playerId = this.clientToPlayer.get(clientId);
     if (!playerId) return;
+    const wasHost = this.players.get(playerId)?.isHost ?? false;
     this.clientToPlayer.delete(clientId);
     this.playerToClient.delete(playerId);
+    this.holdingFixMap.delete(playerId);
     this.players.delete(playerId);
+    if (this.clientToPlayer.size === 0) {
+      return;
+    }
+    if (wasHost) {
+      const nextHuman = Array.from(this.players.values()).find((p) => !p.isBot);
+      if (nextHuman) {
+        nextHuman.isHost = true;
+      }
+    }
     this.broadcastState();
   }
 
@@ -352,25 +374,30 @@ export class P2PHostRoomEngine {
     if (playerList.length < 3) return;
 
     let assigned = assignRoles(playerList, this.settings.vondoCount);
-    assigned = assignSpecialRoles(assigned, this.settings.enableSpecialRoles);
+    assigned = assignSpecialRoles(
+      assigned,
+      this.settings.enableSpecialRoles,
+      undefined,
+      undefined,
+      Math.random,
+      this.settings.enableNeutralRoles,
+    );
+    assignMatchTasks(assigned, this.settings.tasksPerPlayer);
     this.bodies = [];
     this.footprints = [];
     this.footprintAccum.clear();
+    this.holdingFixMap.clear();
     this.chat = [];
     this.ejection = null;
     this.justEjectedPlayer = null;
     this.outcome = null;
     this.meetingCallerId = null;
     this.meetingReason = null;
+    this.netaRevealedId = null;
+    this.prankedLampUntil = 0;
     this.doorLocks = makeEmptyDoorLocks();
     this.emergencyCooldownRemaining = this.settings.emergencyCooldownSec;
-    this.sabotage = {
-      active: null,
-      timeRemaining: 0,
-      fixStationX: 0,
-      fixStationZ: 0,
-      cooldownRemaining: 8,
-    };
+    this.sabotage = createEmptySabotageState(SABOTAGE_INITIAL_LOCKOUT_SEC);
 
     assigned.forEach((p, idx) => {
       const sp = SPAWN_RING[idx % SPAWN_RING.length];
@@ -391,6 +418,10 @@ export class P2PHostRoomEngine {
           ? 6
           : 0;
       p.revivesLeft = p.specialRole === 'daktar' ? 1 : 0;
+      p.scansLeft = p.specialRole === 'goyenda' ? 2 : 0;
+      p.shotsLeft = p.specialRole === 'daroga' ? 1 : 0;
+      p.cleansLeft = p.specialRole === 'jharudar' ? 3 : 0;
+      p.pranksLeft = 1;
       p.shielded = false;
       p.disguiseColor = null;
       p.disguiseName = null;
@@ -401,16 +432,12 @@ export class P2PHostRoomEngine {
         p.specialRole === 'neta'
           ? this.settings.emergencyMeetingsPerPlayer + 1
           : this.settings.emergencyMeetingsPerPlayer;
-      p.killCooldownRemaining = p.role === 'vondo' ? Math.min(12, this.settings.killCooldownSec) : 0;
-      p.tasks =
-        p.role === 'parabasi' && p.specialRole !== 'pagol'
-          ? createPlayerTasks(this.settings.tasksPerPlayer)
-          : [];
+      p.killCooldownRemaining = p.role === 'vondo' ? INITIAL_KILL_COOLDOWN_SEC : 0;
       this.players.set(p.id, p);
     });
 
     this.phase = 'role_reveal';
-    this.phaseTimer = 2.8;
+    this.phaseTimer = 8.0;
     this.pushSystemChat('Khela shuru! Para tasks shesh koro ba Batpar ke Pukur e felo!');
     this.broadcastState();
   }
@@ -424,8 +451,13 @@ export class P2PHostRoomEngine {
     this.ejection = null;
     this.justEjectedPlayer = null;
     this.footprints = [];
-    this.sabotage.active = null;
-    this.sabotage.timeRemaining = 0;
+    this.holdingFixMap.clear();
+    if (isCriticalSabotage(this.sabotage.active)) {
+      this.sabotage = createEmptySabotageState(SABOTAGE_COOLDOWN_SEC);
+    } else {
+      this.sabotage.fixProgress = 0;
+      this.sabotage.fixerId = null;
+    }
     this.doorLocks = makeEmptyDoorLocks();
 
     for (const p of this.players.values()) {
@@ -503,7 +535,7 @@ export class P2PHostRoomEngine {
           }
         }
 
-        const body = findNearestReportableBody(p, this.bodies);
+        const body = findNearestReportableBody(p, this.bodies, this.doorLocks);
         if (body && (p.role === 'parabasi' || (p.specialRole !== 'jharudar' && Math.random() < 0.04))) {
           body.reported = true;
           this.startMeeting(p, 'body', body.victimName);
@@ -530,18 +562,12 @@ export class P2PHostRoomEngine {
         }
 
         if (p.role === 'vondo') {
-          if (!this.sabotage.active && this.sabotage.cooldownRemaining <= 0 && Math.random() < 0.004) {
-            const sabType = Math.random() < 0.55 ? 'loadshedding' : 'wifi_down';
-            const t = SABOTAGE_TARGETS[sabType];
-            this.sabotage = {
-              active: sabType,
-              timeRemaining: SABOTAGE_DURATION_SEC,
-              fixStationX: t.x,
-              fixStationZ: t.z,
-              cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-            };
+          if (!this.sabotage.active && this.sabotage.cooldownRemaining <= 0 && Math.random() < 0.0012) {
+            const roll = Math.random();
+            const sabType = roll < 0.42 ? 'loadshedding' : roll < 0.78 ? 'wifi_down' : 'gas_leak';
+            this.sabotage = createSabotageState(sabType, SABOTAGE_COOLDOWN_SEC);
             this.broadcastState({ type: 'sfx:event', kind: 'sabotage' });
-          } else if (this.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.003) {
+          } else if (this.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.0025) {
             const zones = ['cha_dokan', 'rickshaw_garage', 'desco_power', 'dish_roof'] as const;
             const pick = zones[Math.floor(Math.random() * zones.length)];
             this.doorLocks[pick] = DOOR_LOCK_DURATION_SEC;
@@ -553,12 +579,21 @@ export class P2PHostRoomEngine {
         if (
           this.sabotage.active &&
           p.role === 'parabasi' &&
-          p.specialRole !== 'pagol' &&
-          distance2D(p.x, p.z, this.sabotage.fixStationX, this.sabotage.fixStationZ) <= SABOTAGE_FIX_RANGE &&
-          Math.random() < 0.06
+          p.specialRole !== 'pagol'
         ) {
-          this.sabotage.active = null;
-          this.sabotage.timeRemaining = 0;
+          if (this.sabotage.active === 'gas_leak') {
+            const nearV = findNearestGasValve(
+              p.x,
+              p.z,
+              this.sabotage,
+              p.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE,
+            );
+            if (nearV) this.holdingFixMap.set(p.id, { valveId: nearV.id });
+          } else if (
+            distance2D(p.x, p.z, this.sabotage.fixStationX, this.sabotage.fixStationZ) <= SABOTAGE_FIX_RANGE
+          ) {
+            this.holdingFixMap.set(p.id, {});
+          }
         }
 
         if (p.role === 'vondo' && p.killCooldownRemaining <= 0) {
@@ -598,31 +633,48 @@ export class P2PHostRoomEngine {
           }
         }
 
-        if (mem.pauseTimer > 0) {
+        if (this.holdingFixMap.has(p.id)) {
+          p.vx = 0;
+          p.vz = 0;
+        } else if (mem.pauseTimer > 0) {
           mem.pauseTimer -= dt;
           p.vx = 0;
           p.vz = 0;
-          if (mem.pauseTimer <= 0 && p.role === 'parabasi' && p.specialRole !== 'pagol') {
-            const incomplete = p.tasks.find((t) => !t.completed);
-            if (incomplete && Math.random() < 0.55) {
-              incomplete.completed = true;
-              if (this.checkWin()) return;
+          if (mem.pauseTimer <= 0 && canCompleteTasks(p)) {
+            const incomplete = p.tasks.find(
+              (t) => !t.completed && !isTaskLockedBySabotage(t.taskId, this.sabotage),
+            );
+            if (incomplete) {
+              const st = TASK_STATIONS.find((s) => s.id === incomplete.taskId);
+              if (st && distance2D(p.x, p.z, st.x, st.z) <= st.radius + 1.2) {
+                incomplete.completed = true;
+                if (this.checkWin()) return;
+              }
             }
           }
         } else {
-          const rushSabotage =
-            Boolean(this.sabotage.active) &&
-            p.role === 'parabasi' &&
-            p.specialRole !== 'pagol' &&
-            mem.targetWaypointIdx % 2 === 0;
-          const wp = rushSabotage
-            ? { x: this.sabotage.fixStationX, z: this.sabotage.fixStationZ }
-            : BOT_WAYPOINTS[mem.targetWaypointIdx % BOT_WAYPOINTS.length];
+          const isCrewHelper = p.role === 'parabasi' && p.specialRole !== 'pagol';
+          let wp = BOT_WAYPOINTS[mem.targetWaypointIdx % BOT_WAYPOINTS.length];
+          if (this.sabotage.active && isCrewHelper && mem.targetWaypointIdx % 2 === 0) {
+            if (this.sabotage.active === 'gas_leak') {
+              const valve = GAS_LEAK_VALVES[mem.targetWaypointIdx % GAS_LEAK_VALVES.length];
+              wp = { x: valve.x, z: valve.z };
+            } else {
+              wp = { x: this.sabotage.fixStationX, z: this.sabotage.fixStationZ };
+            }
+          } else if (canCompleteTasks(p)) {
+            const incomplete = p.tasks.find(
+              (t) => !t.completed && !isTaskLockedBySabotage(t.taskId, this.sabotage),
+            );
+            const st = incomplete ? TASK_STATIONS.find((s) => s.id === incomplete.taskId) : null;
+            if (st) wp = { x: st.x, z: st.z };
+          }
           const dx = wp.x - p.x;
           const dz = wp.z - p.z;
           const dist = Math.hypot(dx, dz);
           if (dist < 0.9) {
-            mem.pauseTimer = 1.2 + Math.random() * 2.5;
+            const nearStation = TASK_STATIONS.find((s) => distance2D(p.x, p.z, s.x, s.z) <= s.radius + 1.0);
+            mem.pauseTimer = nearStation ? nearStation.holdDurationSec : 1.2 + Math.random() * 2.5;
             mem.targetWaypointIdx = Math.floor(Math.random() * BOT_WAYPOINTS.length);
             p.vx = 0;
             p.vz = 0;
@@ -662,7 +714,7 @@ export class P2PHostRoomEngine {
           if (mem.voteTimer <= 0) {
             const alive = Array.from(this.players.values()).filter((pl) => pl.alive && pl.id !== p.id);
             p.votedFor =
-              alive.length > 0 && Math.random() < 0.65
+              alive.length > 0 && Math.random() < 0.4
                 ? alive[Math.floor(Math.random() * alive.length)].id
                 : 'skip';
             p.hasVoted = true;
@@ -697,9 +749,6 @@ export class P2PHostRoomEngine {
       if (this.emergencyCooldownRemaining > 0) {
         this.emergencyCooldownRemaining = Math.max(0, this.emergencyCooldownRemaining - dt);
       }
-      if (this.sabotage.cooldownRemaining > 0) {
-        this.sabotage.cooldownRemaining = Math.max(0, this.sabotage.cooldownRemaining - dt);
-      }
       if (this.doorLocks.cooldownRemaining > 0) {
         this.doorLocks.cooldownRemaining = Math.max(0, this.doorLocks.cooldownRemaining - dt);
       }
@@ -708,14 +757,37 @@ export class P2PHostRoomEngine {
       this.doorLocks.desco_power = Math.max(0, this.doorLocks.desco_power - dt);
       this.doorLocks.dish_roof = Math.max(0, this.doorLocks.dish_roof - dt);
 
-      if (this.sabotage.active) {
-        this.sabotage.timeRemaining -= dt;
-        if (this.sabotage.timeRemaining <= 0) {
-          this.checkWin(true);
-          return;
+      for (const hid of Array.from(this.holdingFixMap.keys())) {
+        const hp = this.players.get(hid);
+        if (!hp || !hp.alive || hp.isBot) {
+          this.holdingFixMap.delete(hid);
         }
       }
+
       this.updateBots(dt);
+      if (this.phase !== 'playing') return;
+
+      const sabStep = advanceSabotageState(
+        this.sabotage,
+        Array.from(this.players.values()),
+        dt,
+        this.holdingFixMap,
+      );
+      if (sabStep.fixed) {
+        this.holdingFixMap.clear();
+        this.broadcastState({ type: 'sfx:event', kind: 'task' });
+      } else if (sabStep.expiredCritical) {
+        this.holdingFixMap.clear();
+        this.checkWin(true);
+        return;
+      } else if (sabStep.expiredNonCriticalType) {
+        this.holdingFixMap.clear();
+        this.pushSystemChat(
+          sabStep.expiredNonCriticalType === 'loadshedding'
+            ? 'Current ashche! DESCO line nijei thik hoye gese!'
+            : 'Wi-Fi ashche! Dish line abar chaloo hoye gese!',
+        );
+      }
       this.broadcastState();
     } else if (this.phase === 'meeting') {
       this.updateBots(dt);
@@ -740,8 +812,10 @@ export class P2PHostRoomEngine {
         }
         this.bodies = [];
         this.phase = 'ejecting';
-        this.phaseTimer = 4.2;
-        this.broadcastState({ type: 'sfx:event', kind: 'eject' });
+        this.phaseTimer = this.ejection?.reason === 'voted' ? 7.5 : 5.0;
+        if (this.ejection?.reason === 'voted' && this.ejection.ejectedId) {
+          this.broadcastState({ type: 'sfx:event', kind: 'eject' });
+        }
         this.broadcastState();
       }
     } else if (this.phase === 'ejecting') {
@@ -758,7 +832,7 @@ export class P2PHostRoomEngine {
             p.hasVoted = false;
             p.votedFor = null;
             if (p.role === 'vondo') {
-              p.killCooldownRemaining = Math.max(10, this.settings.killCooldownSec * 0.75);
+              p.killCooldownRemaining = this.settings.killCooldownSec;
             }
             idx++;
           }
@@ -806,35 +880,21 @@ export class P2PHostRoomEngine {
           undefined,
           Array.from(this.players.values()),
         );
-        this.players.set(botId, {
-          id: botId,
-          name: botIdentity.name,
-          color: botIdentity.color,
-          x: sp.x,
-          z: sp.z,
-          vx: 0,
-          vz: 0,
-          yaw: sp.yaw,
-          role: 'parabasi',
-          specialRole: 'none',
-          alive: true,
-          inVent: false,
-          watchingCams: false,
-          visualTaskTimer: 0,
-          abilityCooldown: 0,
-          shielded: false,
-          disguiseColor: null,
-          disguiseName: null,
-          disguiseTimer: 0,
-          isBot: true,
-          isHost: false,
-          tasks: [],
-          killCooldownRemaining: 0,
-          emergencyMeetingsLeft: this.settings.emergencyMeetingsPerPlayer,
-          revivesLeft: 0,
-          votedFor: null,
-          hasVoted: false,
-        });
+        this.players.set(
+          botId,
+          makeDefaultPlayerState({
+            id: botId,
+            name: botIdentity.name,
+            color: botIdentity.color,
+            x: sp.x,
+            z: sp.z,
+            yaw: sp.yaw,
+            isBot: true,
+            isHost: false,
+            ready: true,
+            emergencyMeetingsLeft: this.settings.emergencyMeetingsPerPlayer,
+          }),
+        );
         this.broadcastState();
         break;
       }
@@ -891,13 +951,14 @@ export class P2PHostRoomEngine {
         break;
       }
       case 'player:task_complete': {
-        if (this.phase !== 'playing' || player.role !== 'parabasi' || player.specialRole === 'pagol') return;
+        if (this.phase !== 'playing') return;
+        if (isTaskLockedBySabotage(msg.taskId, this.sabotage)) return;
         const station = TASK_STATIONS.find((s) => s.id === msg.taskId);
         if (!station || distance2D(player.x, player.z, station.x, station.z) > station.radius + 1.5) return;
         const taskItem = player.tasks.find((t) => t.taskId === msg.taskId);
         if (taskItem && !taskItem.completed) {
           taskItem.completed = true;
-          if (station.isVisual && this.settings.visualTasks) {
+          if (canCompleteTasks(player) && !taskItem.isFake && station.isVisual && this.settings.visualTasks) {
             player.visualTaskTimer = 2.6;
           }
           this.transport.sendToClient(clientId, { type: 'sfx:event', kind: 'task' });
@@ -1162,14 +1223,8 @@ export class P2PHostRoomEngine {
       case 'player:sabotage': {
         if (this.phase !== 'playing' || !player.alive || player.role !== 'vondo') return;
         if (this.sabotage.active || this.sabotage.cooldownRemaining > 0) return;
-        const target = SABOTAGE_TARGETS[msg.sabotageType];
-        this.sabotage = {
-          active: msg.sabotageType,
-          timeRemaining: SABOTAGE_DURATION_SEC,
-          fixStationX: target.x,
-          fixStationZ: target.z,
-          cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-        };
+        this.sabotage = createSabotageState(msg.sabotageType, SABOTAGE_COOLDOWN_SEC);
+        this.holdingFixMap.clear();
         this.broadcastState({ type: 'sfx:event', kind: 'sabotage' });
         this.broadcastState();
         break;
@@ -1190,13 +1245,30 @@ export class P2PHostRoomEngine {
         break;
       }
       case 'player:fix_sabotage': {
-        if (this.phase !== 'playing' || !player.alive || !this.sabotage.active) return;
+        if (this.phase !== 'playing' || !player.alive || !this.sabotage.active) {
+          this.holdingFixMap.delete(player.id);
+          return;
+        }
+        if (msg.holding === false) {
+          this.holdingFixMap.delete(player.id);
+          return;
+        }
         const range = player.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
+        if (this.sabotage.active === 'gas_leak') {
+          const nearValve = msg.valveId
+            ? GAS_LEAK_VALVES.find((v) => v.id === msg.valveId && distance2D(player.x, player.z, v.x, v.z) <= range)
+            : findNearestGasValve(player.x, player.z, this.sabotage, range);
+          if (nearValve) {
+            this.holdingFixMap.set(player.id, { valveId: nearValve.id });
+          } else {
+            this.holdingFixMap.delete(player.id);
+          }
+          break;
+        }
         if (distance2D(player.x, player.z, this.sabotage.fixStationX, this.sabotage.fixStationZ) <= range) {
-          this.sabotage.active = null;
-          this.sabotage.timeRemaining = 0;
-          this.transport.sendToClient(clientId, { type: 'sfx:event', kind: 'task' });
-          this.broadcastState();
+          this.holdingFixMap.set(player.id, {});
+        } else {
+          this.holdingFixMap.delete(player.id);
         }
         break;
       }
@@ -1204,6 +1276,8 @@ export class P2PHostRoomEngine {
         if (this.phase !== 'playing' || !player.alive) return;
         const body = this.bodies.find((b) => b.id === msg.bodyId && !b.reported);
         if (!body) return;
+        if (distance2D(player.x, player.z, body.x, body.z) > REPORT_RANGE + 1.0) return;
+        if (!hasLineOfSight(player.x, player.z, body.x, body.z, WALLS, this.doorLocks)) return;
         body.reported = true;
         this.startMeeting(player, 'body', body.victimName);
         break;
@@ -1212,7 +1286,7 @@ export class P2PHostRoomEngine {
         if (
           this.phase !== 'playing' ||
           !player.alive ||
-          this.sabotage.active ||
+          isCriticalSabotage(this.sabotage.active) ||
           this.emergencyCooldownRemaining > 0 ||
           player.emergencyMeetingsLeft <= 0
         ) {

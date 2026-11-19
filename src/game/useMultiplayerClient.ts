@@ -18,11 +18,44 @@ import {
 } from './p2pHostEngine';
 
 const HOST_LOCAL_CLIENT_ID = 'p2p_host_local';
+const MAX_DC_BUFFERED_BYTES = 1_048_576;
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-];
+type BackendTransportMode = 'express' | 'cloudflare-do' | 'p2p';
+
+export function buildIceServers(envVars?: Record<string, string | undefined>): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:80?transport=tcp',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+        'turns:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ];
+
+  const customUrl = envVars?.VITE_TURN_URL?.trim();
+  if (customUrl) {
+    servers.unshift({
+      urls: customUrl,
+      username: envVars?.VITE_TURN_USER?.trim() || undefined,
+      credential: envVars?.VITE_TURN_PASS?.trim() || undefined,
+    });
+  }
+  return servers;
+}
+
+function getRuntimeIceServers(): RTCIceServer[] {
+  const envVars = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  return buildIceServers(envVars);
+}
 
 export function useMultiplayerClient(
   onShake?: (amount: number) => void,
@@ -34,7 +67,12 @@ export function useMultiplayerClient(
   const guestConnRef = useRef<DataConnection | null>(null);
   const hostEngineRef = useRef<P2PHostRoomEngine | null>(null);
   const hostTickRef = useRef<number | null>(null);
-  const backendCheckRef = useRef<Promise<boolean> | null>(null);
+
+  const confirmedBackendRef = useRef<'express' | 'cloudflare-do' | null>(null);
+  const inFlightCheckRef = useRef<Promise<BackendTransportMode> | null>(null);
+  const activeWsUrlRef = useRef<string | null>(null);
+  const intentionallyClosingSocketsRef = useRef<WeakSet<WebSocket>>(new WeakSet());
+  const pendingRoomRetryRef = useRef<(() => void) | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -42,13 +80,31 @@ export function useMultiplayerClient(
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [publicRooms, setPublicRooms] = useState<PublicRoomSummary[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const snapshotRef = useRef<RoomSnapshot | null>(null);
+  snapshotRef.current = snapshot;
   const onShakeRef = useRef(onShake);
   onShakeRef.current = onShake;
   const onClueNoticeRef = useRef(onClueNotice);
   onClueNoticeRef.current = onClueNotice;
 
+  const closeCurrentWs = useCallback(() => {
+    const existing = wsRef.current;
+    if (existing) {
+      intentionallyClosingSocketsRef.current.add(existing);
+      wsRef.current = null;
+      activeWsUrlRef.current = null;
+      try {
+        existing.close();
+      } catch {
+        // ignore close error
+      }
+    }
+  }, []);
+
   const handleServerMessage = useCallback((msg: ServerMessage) => {
     if (msg.type === 'room:joined') {
+      pendingRoomRetryRef.current = null;
       setLocalPlayerId(msg.playerId);
       setSnapshot(msg.snapshot);
       setConnecting(false);
@@ -59,6 +115,13 @@ export function useMultiplayerClient(
     } else if (msg.type === 'room:list_result') {
       setPublicRooms(msg.rooms);
     } else if (msg.type === 'room:error') {
+      if (pendingRoomRetryRef.current && /already active/i.test(msg.message)) {
+        const retry = pendingRoomRetryRef.current;
+        pendingRoomRetryRef.current = null;
+        retry();
+        return;
+      }
+      pendingRoomRetryRef.current = null;
       setConnecting(false);
       setErrorMsg(msg.message);
     } else if (msg.type === 'clue:result') {
@@ -87,7 +150,7 @@ export function useMultiplayerClient(
       } else if (msg.kind === 'vent') {
         soundEngine.playVent();
       } else if (msg.kind === 'eject') {
-        soundEngine.playEject();
+        soundEngine.playEjectBuildup();
       } else if (msg.kind === 'door') {
         soundEngine.playDoorSlam();
         onShakeRef.current?.(0.35);
@@ -124,81 +187,141 @@ export function useMultiplayerClient(
     peerRef.current = null;
   }, []);
 
-  const checkBackendServerAvailable = useCallback(async (): Promise<boolean> => {
-    if (backendCheckRef.current) return backendCheckRef.current;
-    backendCheckRef.current = (async () => {
+  const detectBackendMode = useCallback(async (): Promise<BackendTransportMode> => {
+    if (confirmedBackendRef.current) return confirmedBackendRef.current;
+    if (inFlightCheckRef.current) return inFlightCheckRef.current;
+
+    inFlightCheckRef.current = (async () => {
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 1600);
+      const timer = window.setTimeout(() => controller.abort(), 2200);
       try {
         const res = await fetch(getApiUrl('/api/health'), {
           cache: 'no-store',
           signal: controller.signal,
         });
         const ct = res.headers.get('content-type') ?? '';
-        return res.ok && ct.includes('application/json');
+        if (!res.ok || !ct.includes('application/json')) {
+          return 'p2p';
+        }
+        const payload = (await res.json()) as { ok?: boolean; mode?: string };
+        if (payload?.mode === 'cloudflare-do') {
+          confirmedBackendRef.current = 'cloudflare-do';
+          return 'cloudflare-do';
+        }
+        if (payload?.ok) {
+          confirmedBackendRef.current = 'express';
+          return 'express';
+        }
+        return 'p2p';
       } catch {
-        return false;
+        return 'p2p';
       } finally {
         window.clearTimeout(timer);
+        inFlightCheckRef.current = null;
       }
     })();
-    return backendCheckRef.current;
+
+    return inFlightCheckRef.current;
   }, []);
 
-  const connectWs = useCallback(() => {
-    if (
-      wsRef.current &&
-      (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return wsRef.current;
-    }
-    const ws = new WebSocket(getWebSocketUrl());
-
-    ws.onopen = () => {
-      setConnected(true);
-      setErrorMsg(null);
-      ws.send(JSON.stringify({ type: 'room:list' }));
-      void syncServerMemePack();
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-    };
-
-    ws.onerror = () => {
-      setConnecting(false);
-      setErrorMsg('WebSocket connection interrupted.');
-    };
-
-    ws.onmessage = (ev) => {
-      let msg: ServerMessage;
-      try {
-        msg = JSON.parse(String(ev.data)) as ServerMessage;
-      } catch {
-        return;
+  const openWsAtUrl = useCallback(
+    (targetUrl: string, onOpenPayload?: ClientMessage, forceNew = false) => {
+      if (
+        !forceNew &&
+        wsRef.current &&
+        activeWsUrlRef.current === targetUrl &&
+        (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
+        if (onOpenPayload) {
+          if (wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify(onOpenPayload));
+          } else {
+            wsRef.current.addEventListener(
+              'open',
+              () => {
+                wsRef.current?.send(JSON.stringify(onOpenPayload));
+              },
+              { once: true },
+            );
+          }
+        }
+        return wsRef.current;
       }
-      handleServerMessage(msg);
-    };
 
-    wsRef.current = ws;
-    return ws;
-  }, [handleServerMessage]);
+      closeCurrentWs();
+      const ws = new WebSocket(targetUrl);
+      activeWsUrlRef.current = targetUrl;
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (wsRef.current !== ws) return;
+        setConnected(true);
+        setErrorMsg(null);
+        if (onOpenPayload) {
+          ws.send(JSON.stringify(onOpenPayload));
+        } else {
+          ws.send(JSON.stringify({ type: 'room:list' }));
+        }
+        void syncServerMemePack();
+      };
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+          activeWsUrlRef.current = null;
+        }
+        if (intentionallyClosingSocketsRef.current.has(ws)) return;
+        setConnected(false);
+        setConnecting(false);
+        if (snapshotRef.current) {
+          setErrorMsg('Connection interrupted. Rejoin with your Room Code or return to Title.');
+        }
+      };
+
+      ws.onerror = () => {
+        if (intentionallyClosingSocketsRef.current.has(ws)) return;
+        setConnecting(false);
+        setErrorMsg('Could not reach multiplayer server. Check your internet connection.');
+      };
+
+      ws.onmessage = (ev) => {
+        let msg: ServerMessage;
+        try {
+          msg = JSON.parse(String(ev.data)) as ServerMessage;
+        } catch {
+          return;
+        }
+        handleServerMessage(msg);
+      };
+
+      return ws;
+    },
+    [closeCurrentWs, handleServerMessage],
+  );
+
+  const connectWs = useCallback(() => {
+    return openWsAtUrl(getWebSocketUrl());
+  }, [openWsAtUrl]);
 
   useEffect(() => {
     return () => {
-      wsRef.current?.close();
+      closeCurrentWs();
       cleanupP2P();
     };
-  }, [cleanupP2P]);
+  }, [cleanupP2P, closeCurrentWs]);
 
   const startP2PHostRoom = useCallback(
     (name: string, color: PlayerColorId, attempt = 0) => {
       cleanupP2P();
+      closeCurrentWs();
       setConnecting(true);
       const code = generateP2PRoomCode(5);
       const peer = new Peer(buildPeerIdForRoomCode(code), {
         debug: 0,
-        config: { iceServers: ICE_SERVERS },
+        config: {
+          iceServers: getRuntimeIceServers(),
+          iceCandidatePoolSize: 4,
+        },
       });
       peerRef.current = peer;
 
@@ -209,14 +332,14 @@ export function useMultiplayerClient(
             return;
           }
           const conn = hostConnsRef.current.get(clientId);
-          if (conn && conn.open) {
+          if (conn && conn.open && (conn.dataChannel?.bufferedAmount ?? 0) < MAX_DC_BUFFERED_BYTES) {
             conn.send(msg);
           }
         },
         broadcast: (msg) => {
           handleServerMessage(msg);
           for (const conn of hostConnsRef.current.values()) {
-            if (conn.open) {
+            if (conn.open && (conn.dataChannel?.bufferedAmount ?? 0) < MAX_DC_BUFFERED_BYTES) {
               conn.send(msg);
             }
           }
@@ -230,6 +353,16 @@ export function useMultiplayerClient(
         hostTickRef.current = window.setInterval(() => {
           hostEngineRef.current?.step(0.05);
         }, 50);
+      });
+
+      peer.on('disconnected', () => {
+        if (peerRef.current === peer && !peer.destroyed) {
+          try {
+            peer.reconnect();
+          } catch {
+            // ignore reconnect error
+          }
+        }
       });
 
       peer.on('connection', (conn) => {
@@ -265,31 +398,36 @@ export function useMultiplayerClient(
         setErrorMsg('Could not open Room Code network. Check internet connection and try again.');
       });
     },
-    [cleanupP2P, handleServerMessage],
+    [cleanupP2P, closeCurrentWs, handleServerMessage],
   );
 
   const joinP2PRoom = useCallback(
     (roomCode: string, name: string, color: PlayerColorId) => {
       cleanupP2P();
+      closeCurrentWs();
       const cleanCode = normalizeRoomCode(roomCode);
       if (cleanCode.length < 3) {
+        setConnecting(false);
         setErrorMsg('Enter a valid Room Code.');
         return;
       }
       setConnecting(true);
       const peer = new Peer({
         debug: 0,
-        config: { iceServers: ICE_SERVERS },
+        config: {
+          iceServers: getRuntimeIceServers(),
+          iceCandidatePoolSize: 4,
+        },
       });
       peerRef.current = peer;
 
       const joinTimeout = window.setTimeout(() => {
         if (!guestConnRef.current?.open) {
           setConnecting(false);
-          setErrorMsg(`Room "${cleanCode}" not found or Host is offline.`);
+          setErrorMsg(`Room "${cleanCode}" not found or Host network blocked direct relay.`);
           cleanupP2P();
         }
-      }, 9000);
+      }, 15000);
 
       peer.on('open', () => {
         if (peerRef.current !== peer) return;
@@ -340,7 +478,7 @@ export function useMultiplayerClient(
         setErrorMsg(`Room "${cleanCode}" not found or Host is offline.`);
       });
     },
-    [cleanupP2P, handleServerMessage],
+    [cleanupP2P, closeCurrentWs, handleServerMessage],
   );
 
   const send = useCallback(
@@ -355,69 +493,120 @@ export function useMultiplayerClient(
         }
         return;
       }
-      const ws = connectWs();
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(payload));
-      } else {
-        ws.addEventListener(
-          'open',
-          () => {
-            ws.send(JSON.stringify(payload));
-          },
-          { once: true },
-        );
+      const ws = wsRef.current;
+      if (ws) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(payload));
+        } else if (ws.readyState === WebSocket.CONNECTING && payload.type !== 'player:move') {
+          ws.addEventListener(
+            'open',
+            () => {
+              ws.send(JSON.stringify(payload));
+            },
+            { once: true },
+          );
+        }
+        return;
+      }
+
+      if (confirmedBackendRef.current === 'express' && payload.type !== 'player:move') {
+        openWsAtUrl(getWebSocketUrl(), payload);
       }
     },
-    [connectWs],
+    [openWsAtUrl],
+  );
+
+  const createCloudflareRoom = useCallback(
+    (name: string, color: PlayerColorId, attempt = 0) => {
+      cleanupP2P();
+      const code = generateP2PRoomCode(5);
+      pendingRoomRetryRef.current =
+        attempt < 2 ? () => createCloudflareRoom(name, color, attempt + 1) : null;
+      openWsAtUrl(getWebSocketUrl(code), { type: 'room:create', name, color }, true);
+    },
+    [cleanupP2P, openWsAtUrl],
   );
 
   const createRoom = useCallback(
     (name: string, color: PlayerColorId) => {
       setErrorMsg(null);
       setConnecting(true);
-      void checkBackendServerAvailable().then((hasServer) => {
-        if (hasServer) {
-          send({ type: 'room:create', name, color });
+      void detectBackendMode().then((mode) => {
+        if (mode === 'cloudflare-do') {
+          createCloudflareRoom(name, color);
+        } else if (mode === 'express') {
+          cleanupP2P();
+          openWsAtUrl(getWebSocketUrl(), { type: 'room:create', name, color });
         } else {
           startP2PHostRoom(name, color);
         }
       });
     },
-    [checkBackendServerAvailable, send, startP2PHostRoom],
+    [cleanupP2P, createCloudflareRoom, detectBackendMode, openWsAtUrl, startP2PHostRoom],
   );
 
   const joinRoom = useCallback(
     (roomCode: string, name: string, color: PlayerColorId) => {
+      const cleanCode = normalizeRoomCode(roomCode);
+      if (cleanCode.length < 3) {
+        setConnecting(false);
+        setErrorMsg('Enter a valid Room Code.');
+        return;
+      }
       setErrorMsg(null);
       setConnecting(true);
-      void checkBackendServerAvailable().then((hasServer) => {
-        if (hasServer) {
-          send({ type: 'room:join', roomCode: normalizeRoomCode(roomCode), name, color });
+      void detectBackendMode().then((mode) => {
+        if (mode === 'cloudflare-do') {
+          cleanupP2P();
+          pendingRoomRetryRef.current = null;
+          openWsAtUrl(
+            getWebSocketUrl(cleanCode),
+            { type: 'room:join', roomCode: cleanCode, name, color },
+            true,
+          );
+        } else if (mode === 'express') {
+          cleanupP2P();
+          openWsAtUrl(getWebSocketUrl(), {
+            type: 'room:join',
+            roomCode: cleanCode,
+            name,
+            color,
+          });
         } else {
-          joinP2PRoom(roomCode, name, color);
+          joinP2PRoom(cleanCode, name, color);
         }
       });
     },
-    [checkBackendServerAvailable, joinP2PRoom, send],
+    [cleanupP2P, detectBackendMode, joinP2PRoom, openWsAtUrl],
   );
 
   const refreshRooms = useCallback(() => {
-    void checkBackendServerAvailable().then((hasServer) => {
-      if (hasServer) {
-        send({ type: 'room:list' });
+    void detectBackendMode().then(async (mode) => {
+      if (mode === 'cloudflare-do') {
+        try {
+          const res = await fetch(getApiUrl('/api/rooms'), { cache: 'no-store' });
+          if (res.ok) {
+            const data = (await res.json()) as { rooms?: PublicRoomSummary[] };
+            setPublicRooms(Array.isArray(data.rooms) ? data.rooms : []);
+          }
+        } catch {
+          // ignore transient refresh failure
+        }
+      } else if (mode === 'express') {
+        openWsAtUrl(getWebSocketUrl(), { type: 'room:list' });
       }
     });
-  }, [checkBackendServerAvailable, send]);
+  }, [detectBackendMode, openWsAtUrl]);
 
   const disconnectRoom = useCallback(() => {
-    wsRef.current?.close();
-    wsRef.current = null;
+    pendingRoomRetryRef.current = null;
+    closeCurrentWs();
     cleanupP2P();
     setLocalPlayerId(null);
     setSnapshot(null);
     setConnected(false);
     setConnecting(false);
-  }, [cleanupP2P]);
+  }, [cleanupP2P, closeCurrentWs]);
 
   return {
     connected,

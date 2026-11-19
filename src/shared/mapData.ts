@@ -1,6 +1,8 @@
 import type {
   DoorLockState,
   DoorSpec,
+  GasValveState,
+  SabotageSeverity,
   SabotageType,
   SecurityCamDef,
   TaskStation,
@@ -317,6 +319,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: -35.5,
     z: -32.2,
     radius: 2.8,
+    category: 'common',
+    medium: 'physical',
+    holdDurationSec: 4,
     isVisual: true,
   },
   {
@@ -328,6 +333,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 32.5,
     z: -29.5,
     radius: 2.8,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 3,
   },
   {
     id: 'task_desco',
@@ -338,6 +346,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: -31.2,
     z: 32.5,
     radius: 2.8,
+    category: 'long',
+    medium: 'digital',
+    holdDurationSec: 5,
   },
   {
     id: 'task_dish',
@@ -348,6 +359,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 34.5,
     z: 29.0,
     radius: 2.8,
+    category: 'long',
+    medium: 'digital',
+    holdDurationSec: 6,
   },
   {
     id: 'task_pukur',
@@ -358,6 +372,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: -37.5,
     z: 0,
     radius: 2.9,
+    category: 'common',
+    medium: 'physical',
+    holdDurationSec: 4,
     isVisual: true,
   },
   {
@@ -369,6 +386,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 38.5,
     z: 0,
     radius: 2.8,
+    category: 'common',
+    medium: 'digital',
+    holdDurationSec: 3,
   },
   {
     id: 'task_eidgah',
@@ -379,6 +399,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 0,
     z: -37.0,
     radius: 2.8,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 3,
   },
   {
     id: 'task_wasa',
@@ -389,8 +412,11 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 0,
     z: 32.5,
     radius: 2.8,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 4,
   },
-  // 5 New Tasks in the Expanded Outer Moholla Locations
+  // 5 Outer Moholla Locations
   {
     id: 'task_fuchka',
     kind: 'fuchka_serve',
@@ -400,6 +426,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 0,
     z: -63.8,
     radius: 3.1,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 3,
   },
   {
     id: 'task_saloon',
@@ -410,6 +439,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: -65.5,
     z: -26.0,
     radius: 3.1,
+    category: 'long',
+    medium: 'physical',
+    holdDurationSec: 5,
   },
   {
     id: 'task_cricket',
@@ -420,6 +452,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 65.5,
     z: -26.0,
     radius: 3.2,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 3,
   },
   {
     id: 'task_pharmacy',
@@ -430,6 +465,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: -65.5,
     z: 26.0,
     radius: 3.1,
+    category: 'short',
+    medium: 'physical',
+    holdDurationSec: 4,
   },
   {
     id: 'task_pandal',
@@ -440,6 +478,9 @@ export const TASK_STATIONS: TaskStation[] = [
     x: 64.0,
     z: 26.0,
     radius: 3.2,
+    category: 'long',
+    medium: 'digital',
+    holdDurationSec: 6,
     isVisual: true,
   },
 ];
@@ -629,18 +670,57 @@ export const VENTS: VentNode[] = [
 
 export const EMERGENCY_BELL_POS = { x: 0, z: 0, interactRadius: 4.8 };
 
-export const SABOTAGE_TARGETS: Record<SabotageType, { x: number; z: number; label: string; banglaLabel: string }> = {
+export const GAS_LEAK_VALVES: Array<Omit<GasValveState, 'holderId'>> = [
+  {
+    id: 'valve_cha',
+    label: 'Cha Dokan Gas Valve',
+    zoneName: 'Cha-er Dokan',
+    x: -29.0,
+    z: -32.0,
+  },
+  {
+    id: 'valve_rickshaw',
+    label: 'Rickshaw Garage Valve',
+    zoneName: 'Rickshaw Stand',
+    x: 38.0,
+    z: -29.5,
+  },
+];
+
+export const SABOTAGE_TARGETS: Record<
+  SabotageType,
+  {
+    x: number;
+    z: number;
+    label: string;
+    banglaLabel: string;
+    severity: SabotageSeverity;
+    durationSec: number;
+  }
+> = {
   loadshedding: {
     x: -31.2,
     z: 32.5,
     label: 'DESCO Main Breaker',
     banglaLabel: 'লোডশেডিং মেইন সুইচ',
+    severity: 'non_critical',
+    durationSec: 90,
   },
   wifi_down: {
     x: 34.5,
     z: 29.0,
     label: 'Dish Router Reset',
     banglaLabel: 'ওয়াইফাই রাউটার রিসেট',
+    severity: 'non_critical',
+    durationSec: 90,
+  },
+  gas_leak: {
+    x: -29.0,
+    z: -32.0,
+    label: 'Dual Gas Leak Valves (Cha + Garage)',
+    banglaLabel: 'গ্যাস পাইপ ফেটে গেছে!',
+    severity: 'critical',
+    durationSec: 45,
   },
 };
 
@@ -767,4 +847,74 @@ export function getZoneIdAt(x: number, z: number): string | null {
     }
   }
   return null;
+}
+
+function segmentIntersectsAABB(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  minX: number,
+  maxX: number,
+  minZ: number,
+  maxZ: number,
+): boolean {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = bx - ax;
+  const dz = bz - az;
+
+  const checks: Array<[number, number]> = [
+    [-dx, ax - minX],
+    [dx, maxX - ax],
+    [-dz, az - minZ],
+    [dz, maxZ - az],
+  ];
+
+  for (const [p, q] of checks) {
+    if (Math.abs(p) < 1e-8) {
+      if (q < 0) return false;
+    } else {
+      const r = q / p;
+      if (p < 0) {
+        if (r > t1) return false;
+        if (r > t0) t0 = r;
+      } else {
+        if (r < t0) return false;
+        if (r < t1) t1 = r;
+      }
+    }
+  }
+  return t0 <= t1;
+}
+
+/**
+ * Returns true if there is an unobstructed line of sight between (ax, az) and (bx, bz)
+ * past tall walls (>= 1.8m) and currently locked doors.
+ */
+export function hasLineOfSight(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  walls: WallAABB[] = WALLS,
+  doorLocks?: DoorLockState,
+): boolean {
+  for (let i = 0; i < walls.length; i++) {
+    const w = walls[i];
+    if (w.height < 1.8) continue;
+    if (segmentIntersectsAABB(ax, az, bx, bz, w.minX, w.maxX, w.minZ, w.maxZ)) {
+      return false;
+    }
+  }
+  if (doorLocks) {
+    for (let i = 0; i < DOORS.length; i++) {
+      const d = DOORS[i];
+      if (doorLocks[d.zoneId] <= 0) continue;
+      if (segmentIntersectsAABB(ax, az, bx, bz, d.minX, d.maxX, d.minZ, d.maxZ)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }

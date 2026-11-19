@@ -290,6 +290,20 @@ export function createCharacterRig(
   scanAura.visible = false;
   root.add(scanAura);
 
+  // Translucent Spectral Ghost Tail (visible only when player becomes a Ghost)
+  const ghostTailMat = new THREE.MeshBasicMaterial({
+    color: '#bae6fd',
+    transparent: true,
+    opacity: 0.32,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const ghostTail = new THREE.Mesh(new THREE.ConeGeometry(0.46, 0.72, 16, 1, true), ghostTailMat);
+  ghostTail.rotation.x = Math.PI;
+  ghostTail.position.y = 0.42;
+  ghostTail.visible = false;
+  bodyGroup.add(ghostTail);
+
   // Kobiraj Tabiz Shield Aura
   const shieldAura = new THREE.Mesh(
     _charSharedGeo.shieldAura,
@@ -322,6 +336,7 @@ export function createCharacterRig(
   root.add(nameSprite);
 
   let walkPhase = 0;
+  let ghostMode = false;
 
   return {
     root,
@@ -335,13 +350,28 @@ export function createCharacterRig(
     shieldAura,
     suitMaterials,
     setGhost: (isGhost: boolean) => {
+      ghostMode = isGhost;
       for (const m of suitMaterials) {
         m.transparent = isGhost;
-        m.opacity = isGhost ? 0.36 : 1.0;
+        m.opacity = isGhost ? 0.34 : 1.0;
+        m.emissive.set(isGhost ? '#7dd3fc' : '#000000');
+        m.emissiveIntensity = isGhost ? 0.28 : 0;
+        m.depthWrite = !isGhost;
       }
       visorMat.transparent = isGhost;
-      visorMat.opacity = isGhost ? 0.42 : 1.0;
+      visorMat.opacity = isGhost ? 0.46 : 1.0;
+      (nameSprite.material as THREE.SpriteMaterial).opacity = isGhost ? 0.6 : 1.0;
+
+      leftLeg.visible = !isGhost;
+      rightLeg.visible = !isGhost;
+      beltMesh.visible = !isGhost;
+      packGroup.visible = !isGhost;
+      ghostTail.visible = isGhost;
       shadowMesh.visible = !isGhost;
+
+      torsoMesh.castShadow = !isGhost && !isSoftwareGl;
+      leftLegMesh.castShadow = !isGhost && !isSoftwareGl;
+      rightLegMesh.castShadow = !isGhost && !isSoftwareGl;
     },
     setVisibleState: (visible: boolean) => {
       root.visible = visible;
@@ -405,6 +435,25 @@ export function createCharacterRig(
         const shScale = Math.max(0.42, 1 - jumpY * 0.34);
         shadowMesh.scale.set(shScale, shScale, 1);
         shadowMat.opacity = Math.max(0.16, 0.48 - jumpY * 0.18);
+        return;
+      }
+
+      if (ghostMode) {
+        const hoverY = 0.42 + Math.sin(elapsed * 3.2) * 0.14;
+        bodyGroup.position.y = THREE.MathUtils.damp(bodyGroup.position.y, hoverY, 10, dt);
+        const speedLean = Math.min(0.24, speed * 0.024);
+        bodyGroup.rotation.x = THREE.MathUtils.damp(bodyGroup.rotation.x, speedLean, 10, dt);
+        bodyGroup.rotation.z = THREE.MathUtils.damp(
+          bodyGroup.rotation.z,
+          Math.sin(elapsed * 2.2) * 0.05 + THREE.MathUtils.clamp(turnBank, -0.15, 0.15),
+          10,
+          dt,
+        );
+        leftArm.rotation.x = THREE.MathUtils.damp(leftArm.rotation.x, -0.35 + Math.sin(elapsed * 3) * 0.15, 8, dt);
+        rightArm.rotation.x = THREE.MathUtils.damp(rightArm.rotation.x, -0.35 - Math.sin(elapsed * 3) * 0.15, 8, dt);
+        nameSprite.position.y = 2.34 + hoverY;
+        ghostTail.rotation.y = elapsed * 2.5;
+        ghostTailMat.opacity = 0.28 + Math.sin(elapsed * 4) * 0.08;
         return;
       }
 

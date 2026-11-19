@@ -21,14 +21,15 @@ import {
 import {
   BOT_WAYPOINTS,
   EMERGENCY_BELL_POS,
+  GAS_LEAK_VALVES,
   PLAYER_RADIUS,
-  SABOTAGE_TARGETS,
   SPAWN_RING,
   TASK_STATIONS,
   VENTS,
   WALLS,
   distance2D,
   getZoneNameAt,
+  hasLineOfSight,
   resolveCircleWallCollision,
 } from './src/shared/mapData.ts';
 import {
@@ -38,23 +39,30 @@ import {
   DEFAULT_ROOM_SETTINGS,
   DOOR_LOCK_COOLDOWN_SEC,
   DOOR_LOCK_DURATION_SEC,
+  INITIAL_KILL_COOLDOWN_SEC,
   JHARUDAR_CLEAN_COOLDOWN_SEC,
   KOBIRAJ_COOLDOWN_SEC,
   MISTRI_FIX_RANGE,
   MISTRI_VENT_COOLDOWN_SEC,
+  REPORT_RANGE,
   SABOTAGE_COOLDOWN_SEC,
-  SABOTAGE_DURATION_SEC,
   SABOTAGE_FIX_RANGE,
+  SABOTAGE_INITIAL_LOCKOUT_SEC,
   VENT_RANGE,
+  advanceSabotageState,
+  assignMatchTasks,
   assignRoles,
   assignSpecialRoles,
+  canCompleteTasks,
   canExecuteKill,
   canUseVent,
   computeTaskProgress,
-  createPlayerTasks,
+  createEmptySabotageState,
+  createSabotageState,
   evaluateMatchOutcome,
   findNearestCleanableBody,
   findNearestDarogaTarget,
+  findNearestGasValve,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
@@ -62,6 +70,10 @@ import {
   findNearestShieldTarget,
   getColorShadeHint,
   inspectBodyClue,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
+  makeDefaultPlayerState,
+  makeEmptyDoorLocks,
   resolveDarogaShot,
   resolveVentHopTarget,
   tallyVotes,
@@ -120,6 +132,7 @@ interface RoomInternal {
   clients: Map<string, WebSocket>;
   botMemories: Map<string, BotMemory>;
   footprintAccum: Map<string, number>;
+  holdingFixMap: Map<string, { valveId?: 'valve_cha' | 'valve_rickshaw' }>;
   bodies: BodyMarker[];
   footprints: FootprintDot[];
   sabotage: RoomSnapshot['sabotage'];
@@ -138,16 +151,6 @@ interface RoomInternal {
 
 const rooms = new Map<string, RoomInternal>();
 const socketToPlayer = new Map<WebSocket, { roomCode: string; playerId: string }>();
-
-function makeEmptyDoorLocks(): DoorLockState {
-  return {
-    cha_dokan: 0,
-    rickshaw_garage: 0,
-    desco_power: 0,
-    dish_roof: 0,
-    cooldownRemaining: 0,
-  };
-}
 
 function generateRoomCode(): string {
   const words = ['ADDA', 'CHAI', 'MAMA', 'PARA', 'DESH', 'KELA', 'PUKR'];
@@ -179,7 +182,10 @@ function buildSnapshot(room: RoomInternal): RoomSnapshot {
     players,
     bodies: room.bodies,
     footprints: room.footprints,
-    sabotage: { ...room.sabotage },
+    sabotage: {
+      ...room.sabotage,
+      valves: room.sabotage.valves.map((v) => ({ ...v })),
+    },
     doorLocks: { ...room.doorLocks },
     chat: room.chat.slice(-40),
     meetingCallerId: room.meetingCallerId,
@@ -250,15 +256,10 @@ function createEmptyRoom(code: string): RoomInternal {
     clients: new Map(),
     botMemories: new Map(),
     footprintAccum: new Map(),
+    holdingFixMap: new Map(),
     bodies: [],
     footprints: [],
-    sabotage: {
-      active: null,
-      timeRemaining: 0,
-      fixStationX: 0,
-      fixStationZ: 0,
-      cooldownRemaining: 0,
-    },
+    sabotage: createEmptySabotageState(SABOTAGE_INITIAL_LOCKOUT_SEC),
     doorLocks: makeEmptyDoorLocks(),
     chat: [],
     meetingCallerId: null,
@@ -278,10 +279,19 @@ function startMatch(room: RoomInternal): void {
   if (playerList.length < 3) return;
 
   let assigned = assignRoles(playerList, room.settings.vondoCount);
-  assigned = assignSpecialRoles(assigned, room.settings.enableSpecialRoles);
+  assigned = assignSpecialRoles(
+    assigned,
+    room.settings.enableSpecialRoles,
+    undefined,
+    undefined,
+    Math.random,
+    room.settings.enableNeutralRoles,
+  );
+  assignMatchTasks(assigned, room.settings.tasksPerPlayer);
   room.bodies = [];
   room.footprints = [];
   room.footprintAccum.clear();
+  room.holdingFixMap.clear();
   room.chat = [];
   room.ejection = null;
   room.justEjectedPlayer = null;
@@ -290,13 +300,7 @@ function startMatch(room: RoomInternal): void {
   room.meetingReason = null;
   room.doorLocks = makeEmptyDoorLocks();
   room.emergencyCooldownRemaining = room.settings.emergencyCooldownSec;
-  room.sabotage = {
-    active: null,
-    timeRemaining: 0,
-    fixStationX: 0,
-    fixStationZ: 0,
-    cooldownRemaining: 8,
-  };
+  room.sabotage = createEmptySabotageState(SABOTAGE_INITIAL_LOCKOUT_SEC);
 
   assigned.forEach((p, idx) => {
     const sp = SPAWN_RING[idx % SPAWN_RING.length];
@@ -317,6 +321,10 @@ function startMatch(room: RoomInternal): void {
         ? 6
         : 0;
     p.revivesLeft = p.specialRole === 'daktar' ? 1 : 0;
+    p.scansLeft = p.specialRole === 'goyenda' ? 2 : 0;
+    p.shotsLeft = p.specialRole === 'daroga' ? 1 : 0;
+    p.cleansLeft = p.specialRole === 'jharudar' ? 3 : 0;
+    p.pranksLeft = 1;
     p.shielded = false;
     p.disguiseColor = null;
     p.disguiseName = null;
@@ -327,16 +335,12 @@ function startMatch(room: RoomInternal): void {
       p.specialRole === 'neta'
         ? room.settings.emergencyMeetingsPerPlayer + 1
         : room.settings.emergencyMeetingsPerPlayer;
-    p.killCooldownRemaining = p.role === 'vondo' ? Math.min(12, room.settings.killCooldownSec) : 0;
-    p.tasks =
-      p.role === 'parabasi' && p.specialRole !== 'pagol'
-        ? createPlayerTasks(room.settings.tasksPerPlayer)
-        : [];
+    p.killCooldownRemaining = p.role === 'vondo' ? INITIAL_KILL_COOLDOWN_SEC : 0;
     room.players.set(p.id, p);
   });
 
   room.phase = 'role_reveal';
-  room.phaseTimer = 2.8;
+  room.phaseTimer = 8.0;
   pushSystemChat(room, 'Khela shuru! Para tasks shesh koro ba Batpar ke Pukur e felo!');
   broadcastRoom(room);
 }
@@ -350,8 +354,13 @@ function startMeeting(room: RoomInternal, caller: PlayerState, reason: 'body' | 
   room.ejection = null;
   room.justEjectedPlayer = null;
   room.footprints = [];
-  room.sabotage.active = null;
-  room.sabotage.timeRemaining = 0;
+  room.holdingFixMap.clear();
+  if (isCriticalSabotage(room.sabotage.active)) {
+    room.sabotage = createEmptySabotageState(SABOTAGE_COOLDOWN_SEC);
+  } else {
+    room.sabotage.fixProgress = 0;
+    room.sabotage.fixerId = null;
+  }
   room.doorLocks = makeEmptyDoorLocks();
 
   for (const p of room.players.values()) {
@@ -450,7 +459,7 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
         }
       }
 
-      const body = findNearestReportableBody(p, room.bodies);
+      const body = findNearestReportableBody(p, room.bodies, room.doorLocks);
       if (body && (p.role === 'parabasi' || (p.specialRole !== 'jharudar' && Math.random() < 0.04))) {
         body.reported = true;
         startMeeting(room, p, 'body', body.victimName);
@@ -480,19 +489,13 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
         if (
           !room.sabotage.active &&
           room.sabotage.cooldownRemaining <= 0 &&
-          Math.random() < 0.004
+          Math.random() < 0.0012
         ) {
-          const sabType = Math.random() < 0.55 ? 'loadshedding' : 'wifi_down';
-          const t = SABOTAGE_TARGETS[sabType];
-          room.sabotage = {
-            active: sabType,
-            timeRemaining: SABOTAGE_DURATION_SEC,
-            fixStationX: t.x,
-            fixStationZ: t.z,
-            cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-          };
+          const roll = Math.random();
+          const sabType = roll < 0.42 ? 'loadshedding' : roll < 0.78 ? 'wifi_down' : 'gas_leak';
+          room.sabotage = createSabotageState(sabType, SABOTAGE_COOLDOWN_SEC);
           broadcastRoom(room, { type: 'sfx:event', kind: 'sabotage' });
-        } else if (room.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.003) {
+        } else if (room.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.0025) {
           const zones = ['cha_dokan', 'rickshaw_garage', 'desco_power', 'dish_roof'] as const;
           const pick = zones[Math.floor(Math.random() * zones.length)];
           room.doorLocks[pick] = DOOR_LOCK_DURATION_SEC;
@@ -504,13 +507,17 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
       if (
         room.sabotage.active &&
         p.role === 'parabasi' &&
-        p.specialRole !== 'pagol' &&
-        distance2D(p.x, p.z, room.sabotage.fixStationX, room.sabotage.fixStationZ) <=
-          SABOTAGE_FIX_RANGE &&
-        Math.random() < 0.06
+        p.specialRole !== 'pagol'
       ) {
-        room.sabotage.active = null;
-        room.sabotage.timeRemaining = 0;
+        const range = p.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
+        if (room.sabotage.active === 'gas_leak') {
+          const nearV = findNearestGasValve(p.x, p.z, room.sabotage, range);
+          if (nearV) room.holdingFixMap.set(p.id, { valveId: nearV.id });
+        } else if (
+          distance2D(p.x, p.z, room.sabotage.fixStationX, room.sabotage.fixStationZ) <= range
+        ) {
+          room.holdingFixMap.set(p.id, {});
+        }
       }
 
       if (p.role === 'vondo' && p.killCooldownRemaining <= 0) {
@@ -553,31 +560,48 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
         }
       }
 
-      if (mem.pauseTimer > 0) {
+      if (room.holdingFixMap.has(p.id)) {
+        p.vx = 0;
+        p.vz = 0;
+      } else if (mem.pauseTimer > 0) {
         mem.pauseTimer -= dt;
         p.vx = 0;
         p.vz = 0;
-        if (mem.pauseTimer <= 0 && p.role === 'parabasi' && p.specialRole !== 'pagol') {
-          const incomplete = p.tasks.find((t) => !t.completed);
-          if (incomplete && Math.random() < 0.55) {
-            incomplete.completed = true;
-            if (checkAndApplyWinCondition(room)) return;
+        if (mem.pauseTimer <= 0 && canCompleteTasks(p)) {
+          const incomplete = p.tasks.find(
+            (t) => !t.completed && !isTaskLockedBySabotage(t.taskId, room.sabotage),
+          );
+          if (incomplete) {
+            const st = TASK_STATIONS.find((s) => s.id === incomplete.taskId);
+            if (st && distance2D(p.x, p.z, st.x, st.z) <= st.radius + 1.2) {
+              incomplete.completed = true;
+              if (checkAndApplyWinCondition(room)) return;
+            }
           }
         }
       } else {
-        const rushSabotage =
-          Boolean(room.sabotage.active) &&
-          p.role === 'parabasi' &&
-          p.specialRole !== 'pagol' &&
-          mem.targetWaypointIdx % 2 === 0;
-        const wp = rushSabotage
-          ? { x: room.sabotage.fixStationX, z: room.sabotage.fixStationZ }
-          : BOT_WAYPOINTS[mem.targetWaypointIdx % BOT_WAYPOINTS.length];
+        const isCrewHelper = p.role === 'parabasi' && p.specialRole !== 'pagol';
+        let wp = BOT_WAYPOINTS[mem.targetWaypointIdx % BOT_WAYPOINTS.length];
+        if (room.sabotage.active && isCrewHelper && mem.targetWaypointIdx % 2 === 0) {
+          if (room.sabotage.active === 'gas_leak') {
+            const valve = GAS_LEAK_VALVES[mem.targetWaypointIdx % GAS_LEAK_VALVES.length];
+            wp = { x: valve.x, z: valve.z };
+          } else {
+            wp = { x: room.sabotage.fixStationX, z: room.sabotage.fixStationZ };
+          }
+        } else if (canCompleteTasks(p)) {
+          const incomplete = p.tasks.find(
+            (t) => !t.completed && !isTaskLockedBySabotage(t.taskId, room.sabotage),
+          );
+          const st = incomplete ? TASK_STATIONS.find((s) => s.id === incomplete.taskId) : null;
+          if (st) wp = { x: st.x, z: st.z };
+        }
         const dx = wp.x - p.x;
         const dz = wp.z - p.z;
         const dist = Math.hypot(dx, dz);
         if (dist < 0.9) {
-          mem.pauseTimer = 1.2 + Math.random() * 2.5;
+          const nearStation = TASK_STATIONS.find((s) => distance2D(p.x, p.z, s.x, s.z) <= s.radius + 1.0);
+          mem.pauseTimer = nearStation ? nearStation.holdDurationSec : 1.2 + Math.random() * 2.5;
           mem.targetWaypointIdx = Math.floor(Math.random() * BOT_WAYPOINTS.length);
           p.vx = 0;
           p.vz = 0;
@@ -610,7 +634,7 @@ function updateRoomBots(room: RoomInternal, dt: number): void {
         mem.voteTimer -= dt;
         if (mem.voteTimer <= 0) {
           const alive = Array.from(room.players.values()).filter((pl) => pl.alive && pl.id !== p.id);
-          if (alive.length > 0 && Math.random() < 0.65) {
+          if (alive.length > 0 && Math.random() < 0.4) {
             p.votedFor = alive[Math.floor(Math.random() * alive.length)].id;
           } else {
             p.votedFor = 'skip';
@@ -651,25 +675,38 @@ setInterval(() => {
       if (room.emergencyCooldownRemaining > 0) {
         room.emergencyCooldownRemaining = Math.max(0, room.emergencyCooldownRemaining - dt);
       }
-      if (room.sabotage.cooldownRemaining > 0) {
-        room.sabotage.cooldownRemaining = Math.max(0, room.sabotage.cooldownRemaining - dt);
-      }
-      if (room.doorLocks.cooldownRemaining > 0) {
-        room.doorLocks.cooldownRemaining = Math.max(0, room.doorLocks.cooldownRemaining - dt);
-      }
-      room.doorLocks.cha_dokan = Math.max(0, room.doorLocks.cha_dokan - dt);
-      room.doorLocks.rickshaw_garage = Math.max(0, room.doorLocks.rickshaw_garage - dt);
-      room.doorLocks.desco_power = Math.max(0, room.doorLocks.desco_power - dt);
-      room.doorLocks.dish_roof = Math.max(0, room.doorLocks.dish_roof - dt);
-
-      if (room.sabotage.active) {
-        room.sabotage.timeRemaining -= dt;
-        if (room.sabotage.timeRemaining <= 0) {
-          checkAndApplyWinCondition(room, true);
-          continue;
+      for (const hid of Array.from(room.holdingFixMap.keys())) {
+        const hp = room.players.get(hid);
+        if (!hp || !hp.alive || hp.isBot) {
+          room.holdingFixMap.delete(hid);
         }
       }
+
       updateRoomBots(room, dt);
+      if (room.phase !== 'playing') continue;
+
+      const sabStep = advanceSabotageState(
+        room.sabotage,
+        Array.from(room.players.values()),
+        dt,
+        room.holdingFixMap,
+      );
+      if (sabStep.fixed) {
+        room.holdingFixMap.clear();
+        broadcastRoom(room, { type: 'sfx:event', kind: 'task' });
+      } else if (sabStep.expiredCritical) {
+        room.holdingFixMap.clear();
+        checkAndApplyWinCondition(room, true);
+        continue;
+      } else if (sabStep.expiredNonCriticalType) {
+        room.holdingFixMap.clear();
+        pushSystemChat(
+          room,
+          sabStep.expiredNonCriticalType === 'loadshedding'
+            ? 'Current ashche! DESCO line nijei thik hoye gese!'
+            : 'Wi-Fi ashche! Dish line abar chaloo hoye gese!',
+        );
+      }
       broadcastRoom(room);
     } else if (room.phase === 'meeting') {
       updateRoomBots(room, dt);
@@ -694,8 +731,10 @@ setInterval(() => {
         }
         room.bodies = [];
         room.phase = 'ejecting';
-        room.phaseTimer = 4.2;
-        broadcastRoom(room, { type: 'sfx:event', kind: 'eject' });
+        room.phaseTimer = room.ejection?.reason === 'voted' ? 7.5 : 5.0;
+        if (room.ejection?.reason === 'voted' && room.ejection.ejectedId) {
+          broadcastRoom(room, { type: 'sfx:event', kind: 'eject' });
+        }
         broadcastRoom(room);
       }
     } else if (room.phase === 'ejecting') {
@@ -712,7 +751,7 @@ setInterval(() => {
             p.hasVoted = false;
             p.votedFor = null;
             if (p.role === 'vondo') {
-              p.killCooldownRemaining = Math.max(10, room.settings.killCooldownSec * 0.75);
+              p.killCooldownRemaining = room.settings.killCooldownSec;
             }
             idx++;
           }
@@ -793,35 +832,18 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
     );
     const isHost = room.players.size === 0;
 
-    const player: PlayerState = {
+    const player: PlayerState = makeDefaultPlayerState({
       id: playerId,
-      name: resolvedIdentity.name,
+      name: resolvedIdentity.name.slice(0, 12),
       color: resolvedIdentity.color,
       x: sp.x,
       z: sp.z,
-      vx: 0,
-      vz: 0,
       yaw: sp.yaw,
-      role: 'parabasi',
-      specialRole: 'none',
-      alive: true,
-      inVent: false,
-      watchingCams: false,
-      visualTaskTimer: 0,
-      abilityCooldown: 0,
-      shielded: false,
-      disguiseColor: null,
-      disguiseName: null,
-      disguiseTimer: 0,
       isBot: false,
       isHost,
-      tasks: [],
-      killCooldownRemaining: 0,
+      ready: isHost,
       emergencyMeetingsLeft: room.settings.emergencyMeetingsPerPlayer,
-      revivesLeft: 0,
-      votedFor: null,
-      hasVoted: false,
-    };
+    });
 
     room.players.set(playerId, player);
     room.clients.set(playerId, ws);
@@ -856,35 +878,21 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       const sp = SPAWN_RING[room.players.size % SPAWN_RING.length];
       const botName = BOT_NAMES[room.players.size % BOT_NAMES.length];
       const botColor = pickAvailableColor(room);
-      room.players.set(botId, {
-        id: botId,
-        name: botName,
-        color: botColor,
-        x: sp.x,
-        z: sp.z,
-        vx: 0,
-        vz: 0,
-        yaw: sp.yaw,
-        role: 'parabasi',
-        specialRole: 'none',
-        alive: true,
-        inVent: false,
-        watchingCams: false,
-        visualTaskTimer: 0,
-        abilityCooldown: 0,
-        shielded: false,
-        disguiseColor: null,
-        disguiseName: null,
-        disguiseTimer: 0,
-        isBot: true,
-        isHost: false,
-        tasks: [],
-        killCooldownRemaining: 0,
-        emergencyMeetingsLeft: room.settings.emergencyMeetingsPerPlayer,
-        revivesLeft: 0,
-        votedFor: null,
-        hasVoted: false,
-      });
+      room.players.set(
+        botId,
+        makeDefaultPlayerState({
+          id: botId,
+          name: botName,
+          color: botColor,
+          x: sp.x,
+          z: sp.z,
+          yaw: sp.yaw,
+          isBot: true,
+          isHost: false,
+          ready: true,
+          emergencyMeetingsLeft: room.settings.emergencyMeetingsPerPlayer,
+        }),
+      );
       broadcastRoom(room);
       break;
     }
@@ -941,13 +949,14 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       break;
     }
     case 'player:task_complete': {
-      if (room.phase !== 'playing' || player.role !== 'parabasi' || player.specialRole === 'pagol') return;
+      if (room.phase !== 'playing') return;
+      if (isTaskLockedBySabotage(msg.taskId, room.sabotage)) return;
       const station = TASK_STATIONS.find((s) => s.id === msg.taskId);
       if (!station || distance2D(player.x, player.z, station.x, station.z) > station.radius + 1.5) return;
       const taskItem = player.tasks.find((t) => t.taskId === msg.taskId);
       if (taskItem && !taskItem.completed) {
         taskItem.completed = true;
-        if (station.isVisual && room.settings.visualTasks) {
+        if (canCompleteTasks(player) && !taskItem.isFake && station.isVisual && room.settings.visualTasks) {
           player.visualTaskTimer = 2.6;
         }
         sendToSocket(ws, { type: 'sfx:event', kind: 'task' });
@@ -1215,14 +1224,8 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
     case 'player:sabotage': {
       if (room.phase !== 'playing' || !player.alive || player.role !== 'vondo') return;
       if (room.sabotage.active || room.sabotage.cooldownRemaining > 0) return;
-      const target = SABOTAGE_TARGETS[msg.sabotageType];
-      room.sabotage = {
-        active: msg.sabotageType,
-        timeRemaining: SABOTAGE_DURATION_SEC,
-        fixStationX: target.x,
-        fixStationZ: target.z,
-        cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-      };
+      room.sabotage = createSabotageState(msg.sabotageType, SABOTAGE_COOLDOWN_SEC);
+      room.holdingFixMap.clear();
       broadcastRoom(room, { type: 'sfx:event', kind: 'sabotage' });
       broadcastRoom(room);
       break;
@@ -1243,15 +1246,30 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       break;
     }
     case 'player:fix_sabotage': {
-      if (room.phase !== 'playing' || !player.alive || !room.sabotage.active) return;
+      if (room.phase !== 'playing' || !player.alive || !room.sabotage.active) {
+        room.holdingFixMap.delete(player.id);
+        return;
+      }
+      if (msg.holding === false) {
+        room.holdingFixMap.delete(player.id);
+        return;
+      }
       const range = player.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
-      if (
-        distance2D(player.x, player.z, room.sabotage.fixStationX, room.sabotage.fixStationZ) <= range
-      ) {
-        room.sabotage.active = null;
-        room.sabotage.timeRemaining = 0;
-        sendToSocket(ws, { type: 'sfx:event', kind: 'task' });
-        broadcastRoom(room);
+      if (room.sabotage.active === 'gas_leak') {
+        const nearValve = msg.valveId
+          ? GAS_LEAK_VALVES.find((v) => v.id === msg.valveId && distance2D(player.x, player.z, v.x, v.z) <= range)
+          : findNearestGasValve(player.x, player.z, room.sabotage, range);
+        if (nearValve) {
+          room.holdingFixMap.set(player.id, { valveId: nearValve.id });
+        } else {
+          room.holdingFixMap.delete(player.id);
+        }
+        break;
+      }
+      if (distance2D(player.x, player.z, room.sabotage.fixStationX, room.sabotage.fixStationZ) <= range) {
+        room.holdingFixMap.set(player.id, {});
+      } else {
+        room.holdingFixMap.delete(player.id);
       }
       break;
     }
@@ -1259,6 +1277,8 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       if (room.phase !== 'playing' || !player.alive) return;
       const body = room.bodies.find((b) => b.id === msg.bodyId && !b.reported);
       if (!body) return;
+      if (distance2D(player.x, player.z, body.x, body.z) > REPORT_RANGE + 1.0) return;
+      if (!hasLineOfSight(player.x, player.z, body.x, body.z, WALLS, room.doorLocks)) return;
       body.reported = true;
       startMeeting(room, player, 'body', body.victimName);
       break;
@@ -1267,7 +1287,7 @@ function handleSocketMessage(ws: WebSocket, raw: string): void {
       if (
         room.phase !== 'playing' ||
         !player.alive ||
-        room.sabotage.active ||
+        isCriticalSabotage(room.sabotage.active) ||
         room.emergencyCooldownRemaining > 0 ||
         player.emergencyMeetingsLeft <= 0
       ) {
@@ -1448,6 +1468,7 @@ async function bootstrap(): Promise<void> {
       if (!room) return;
       const wasHost = room.players.get(ref.playerId)?.isHost ?? false;
       room.clients.delete(ref.playerId);
+      room.holdingFixMap.delete(ref.playerId);
       room.players.delete(ref.playerId);
 
       if (room.clients.size === 0) {
@@ -1463,7 +1484,7 @@ async function bootstrap(): Promise<void> {
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, activeRooms: rooms.size });
+    res.json({ ok: true, mode: 'express', activeRooms: rooms.size });
   });
 
   // Server-Side Viral Bangla Meme Audio Endpoints

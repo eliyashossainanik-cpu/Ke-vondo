@@ -11,41 +11,47 @@ import {
 import {
   BOT_WAYPOINTS,
   EMERGENCY_BELL_POS,
+  GAS_LEAK_VALVES,
   PLAYER_RADIUS,
-  SABOTAGE_TARGETS,
   SPAWN_RING,
   TASK_STATIONS,
   VENTS,
   WALLS,
   distance2D,
   getZoneNameAt,
+  hasLineOfSight,
   resolveCircleWallCollision,
 } from '../shared/mapData';
 import {
   BOHURUPI_COOLDOWN_SEC,
   BOHURUPI_DISGUISE_DURATION_SEC,
   DAROGA_COOLDOWN_SEC,
-  DEFAULT_ROOM_SETTINGS,
   DOOR_LOCK_COOLDOWN_SEC,
   DOOR_LOCK_DURATION_SEC,
+  INITIAL_KILL_COOLDOWN_SEC,
   JHARUDAR_CLEAN_COOLDOWN_SEC,
   KOBIRAJ_COOLDOWN_SEC,
   MISTRI_FIX_RANGE,
   MISTRI_VENT_COOLDOWN_SEC,
+  REPORT_RANGE,
   SABOTAGE_COOLDOWN_SEC,
-  SABOTAGE_DURATION_SEC,
   SABOTAGE_FIX_RANGE,
+  SABOTAGE_INITIAL_LOCKOUT_SEC,
   VENT_RANGE,
+  advanceSabotageState,
+  assignMatchTasks,
   assignRoles,
   assignSpecialRoles,
   canCompleteTasks,
   canExecuteKill,
   canUseVent,
   computeTaskProgress,
-  createPlayerTasks,
+  createEmptySabotageState,
+  createSabotageState,
   evaluateMatchOutcome,
   findNearestCleanableBody,
   findNearestDarogaTarget,
+  findNearestGasValve,
   findNearestInspectableBody,
   findNearestKillTarget,
   findNearestReportableBody,
@@ -53,6 +59,10 @@ import {
   findNearestShieldTarget,
   getColorShadeHint,
   inspectBodyClue,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
+  makeDefaultPlayerState,
+  makeEmptyDoorLocks,
   resolveDarogaShot,
   resolveVentHopTarget,
   sanitizeSoloConfig,
@@ -106,6 +116,7 @@ export class SoloMatchEngine {
   private phaseTimer = 0;
   private footprintAccum = new Map<string, number>();
   private justEjectedPlayer: PlayerState | null = null;
+  private holdingFixMap = new Map<string, { valveId?: 'valve_cha' | 'valve_rickshaw' }>();
   public onClueNotice?: (title: string, detail: string) => void;
 
   constructor(
@@ -119,69 +130,37 @@ export class SoloMatchEngine {
     requestedPlayerCount: number = 7,
   ) {
     this.onClueNotice = onClueNotice;
-    const cleanName = playerName.trim() || 'Lal Mia';
+    const cleanName = playerName.trim().slice(0, 12) || 'Lal Mia';
     const { playerCount, settings } = sanitizeSoloConfig(requestedPlayerCount, customSettings);
     const pickedOthers = BOT_ROSTER.filter((b) => b.color !== playerColor).slice(0, playerCount - 1);
 
     const rawPlayers: PlayerState[] = [
-      {
+      makeDefaultPlayerState({
         id: this.localPlayerId,
         name: cleanName,
         color: playerColor,
         x: SPAWN_RING[0].x,
         z: SPAWN_RING[0].z,
-        vx: 0,
-        vz: 0,
         yaw: SPAWN_RING[0].yaw,
-        role: 'parabasi',
-        specialRole: 'none',
-        alive: true,
-        inVent: false,
-        watchingCams: false,
-        visualTaskTimer: 0,
-        abilityCooldown: 0,
-        shielded: false,
-        disguiseColor: null,
-        disguiseName: null,
-        disguiseTimer: 0,
         isBot: false,
         isHost: true,
-        tasks: [],
-        killCooldownRemaining: 0,
+        ready: true,
         emergencyMeetingsLeft: settings.emergencyMeetingsPerPlayer,
-        revivesLeft: 0,
-        votedFor: null,
-        hasVoted: false,
-      },
-      ...pickedOthers.map((b, i) => ({
-        id: `bot_${i + 1}`,
-        name: b.name,
-        color: b.color,
-        x: SPAWN_RING[(i + 1) % SPAWN_RING.length].x,
-        z: SPAWN_RING[(i + 1) % SPAWN_RING.length].z,
-        vx: 0,
-        vz: 0,
-        yaw: SPAWN_RING[(i + 1) % SPAWN_RING.length].yaw,
-        role: 'parabasi' as const,
-        specialRole: 'none' as const,
-        alive: true,
-        inVent: false,
-        watchingCams: false,
-        visualTaskTimer: 0,
-        abilityCooldown: 0,
-        shielded: false,
-        disguiseColor: null,
-        disguiseName: null,
-        disguiseTimer: 0,
-        isBot: true,
-        isHost: false,
-        tasks: [],
-        killCooldownRemaining: 0,
-        emergencyMeetingsLeft: settings.emergencyMeetingsPerPlayer,
-        revivesLeft: 0,
-        votedFor: null,
-        hasVoted: false,
-      })),
+      }),
+      ...pickedOthers.map((b, i) =>
+        makeDefaultPlayerState({
+          id: `bot_${i + 1}`,
+          name: b.name,
+          color: b.color,
+          x: SPAWN_RING[(i + 1) % SPAWN_RING.length].x,
+          z: SPAWN_RING[(i + 1) % SPAWN_RING.length].z,
+          yaw: SPAWN_RING[(i + 1) % SPAWN_RING.length].yaw,
+          isBot: true,
+          isHost: false,
+          ready: true,
+          emergencyMeetingsLeft: settings.emergencyMeetingsPerPlayer,
+        }),
+      ),
     ];
 
     const effectiveBaseRole =
@@ -211,14 +190,14 @@ export class SoloMatchEngine {
       settings.enableSpecialRoles,
       forceSpecialRole,
       this.localPlayerId,
+      Math.random,
+      settings.enableNeutralRoles,
     );
 
+    assignMatchTasks(assigned, settings.tasksPerPlayer);
+
     for (const p of assigned) {
-      p.tasks =
-        canCompleteTasks(p)
-          ? createPlayerTasks(settings.tasksPerPlayer)
-          : [];
-      p.killCooldownRemaining = p.role === 'vondo' ? Math.min(12, settings.killCooldownSec) : 0;
+      p.killCooldownRemaining = p.role === 'vondo' ? INITIAL_KILL_COOLDOWN_SEC : 0;
       p.abilityCooldown =
         p.specialRole === 'bohurupi' ||
         p.specialRole === 'kobiraj' ||
@@ -227,6 +206,10 @@ export class SoloMatchEngine {
           ? 6
           : 0;
       p.revivesLeft = p.specialRole === 'daktar' ? 1 : 0;
+      p.scansLeft = p.specialRole === 'goyenda' ? 2 : 0;
+      p.shotsLeft = p.specialRole === 'daroga' ? 1 : 0;
+      p.cleansLeft = p.specialRole === 'jharudar' ? 3 : 0;
+      p.pranksLeft = 1;
       if (p.specialRole === 'neta') {
         p.emergencyMeetingsLeft = settings.emergencyMeetingsPerPlayer + 1;
       }
@@ -244,24 +227,13 @@ export class SoloMatchEngine {
 
     this.snapshot = {
       roomCode: 'SOLO',
+      isSolo: true,
       phase: skipRoleReveal ? 'playing' : 'role_reveal',
       players: assigned,
       bodies: [],
       footprints: [],
-      sabotage: {
-        active: null,
-        timeRemaining: 0,
-        fixStationX: 0,
-        fixStationZ: 0,
-        cooldownRemaining: 10,
-      },
-      doorLocks: {
-        cha_dokan: 0,
-        rickshaw_garage: 0,
-        desco_power: 0,
-        dish_roof: 0,
-        cooldownRemaining: 0,
-      },
+      sabotage: createEmptySabotageState(SABOTAGE_INITIAL_LOCKOUT_SEC),
+      doorLocks: makeEmptyDoorLocks(),
       chat: [
         {
           id: 'sys_start',
@@ -269,15 +241,18 @@ export class SoloMatchEngine {
           senderName: 'Moholla Announcement',
           senderColor: 'holud',
           text: settings.enableSpecialRoles
-            ? 'Khela shuru! Special Moholla roles are active — watch out for Goyenda, Kobiraj, Mistri, Bohurupi & Pagol!'
+            ? 'Khela shuru! Special Moholla roles active — Batpar theke shabdhan!'
             : 'Khela shuru! Classic Moholla match — finish Para tasks or expose the Batpar in Shalish!',
           timestamp: Date.now(),
           system: true,
         },
       ],
+      lobbyChat: [],
+      lobbyCountdownSec: null,
       meetingCallerId: null,
       meetingReason: null,
       meetingTimer: 0,
+      discussionTimer: 0,
       emergencyCooldownRemaining: skipRoleReveal ? 0 : settings.emergencyCooldownSec,
       ejection: null,
       outcome: null,
@@ -285,19 +260,23 @@ export class SoloMatchEngine {
       taskProgress: stats.progress,
       totalTasks: stats.totalTasks,
       completedTasks: stats.completedTasks,
+      netaRevealedId: null,
+      prankedLampUntil: 0,
     };
 
-    this.phaseTimer = skipRoleReveal ? 0 : 2.6;
-    const lp = assigned.find((p) => p.id === this.localPlayerId);
-    if (!skipRoleReveal && lp) {
-      soundEngine.playRoleReveal(lp.role === 'vondo');
-    }
+    this.phaseTimer = skipRoleReveal ? 0 : 15.0;
   }
 
   public dismissRoleReveal(): void {
     if (this.snapshot.phase === 'role_reveal') {
       this.snapshot.phase = 'playing';
       this.phaseTimer = 0;
+    }
+  }
+
+  public dismissEjection(): void {
+    if (this.snapshot.phase === 'ejecting') {
+      this.phaseTimer = 0.01;
     }
   }
 
@@ -308,10 +287,15 @@ export class SoloMatchEngine {
       players: this.snapshot.players.map((p) => ({ ...p, tasks: p.tasks.map((t) => ({ ...t })) })),
       bodies: this.snapshot.bodies.map((b) => ({ ...b })),
       footprints: this.snapshot.footprints.map((f) => ({ ...f })),
-      sabotage: { ...this.snapshot.sabotage },
+      sabotage: {
+        ...this.snapshot.sabotage,
+        valves: this.snapshot.sabotage.valves.map((v) => ({ ...v })),
+      },
       doorLocks: { ...this.snapshot.doorLocks },
       chat: [...this.snapshot.chat],
+      lobbyChat: [...this.snapshot.lobbyChat],
       meetingTimer: Math.max(0, Math.ceil(this.snapshot.meetingTimer)),
+      discussionTimer: Math.max(0, Math.ceil(this.snapshot.discussionTimer ?? 0)),
       emergencyCooldownRemaining: Math.max(0, Math.ceil(this.snapshot.emergencyCooldownRemaining)),
       taskProgress: stats.progress,
       totalTasks: stats.totalTasks,
@@ -363,20 +347,27 @@ export class SoloMatchEngine {
 
   public completeLocalTask(taskId: string): boolean {
     const lp = this.snapshot.players.find((p) => p.id === this.localPlayerId);
-    if (!lp || lp.role !== 'parabasi' || lp.specialRole === 'pagol') return false;
+    if (!lp) return false;
+    if (isTaskLockedBySabotage(taskId, this.snapshot.sabotage)) return false;
     const st = TASK_STATIONS.find((s) => s.id === taskId);
     if (!st || distance2D(lp.x, lp.z, st.x, st.z) > st.radius + 1.5) return false;
     const t = lp.tasks.find((item) => item.taskId === taskId);
-    if (t && !t.completed) {
+    if (!t || t.completed) return false;
+
+    // Batpar fake tasks mark locally on their fake checklist ONLY — NO visual effect & NO team progress
+    if (!canCompleteTasks(lp) || t.isFake) {
       t.completed = true;
-      if (st.isVisual && this.snapshot.settings.visualTasks) {
-        lp.visualTaskTimer = 2.8;
-      }
       soundEngine.playTaskComplete();
-      this.checkWin();
-      return true;
+      return false;
     }
-    return false;
+
+    t.completed = true;
+    if (st.isVisual && this.snapshot.settings.visualTasks) {
+      lp.visualTaskTimer = 2.8;
+    }
+    soundEngine.playTaskComplete();
+    this.checkWin();
+    return true;
   }
 
   public useSpecialAbility(targetId?: string): void {
@@ -617,14 +608,8 @@ export class SoloMatchEngine {
     const lp = this.snapshot.players.find((p) => p.id === this.localPlayerId);
     if (!lp || !lp.alive || lp.role !== 'vondo') return;
     if (this.snapshot.sabotage.active || this.snapshot.sabotage.cooldownRemaining > 0) return;
-    const t = SABOTAGE_TARGETS[type];
-    this.snapshot.sabotage = {
-      active: type,
-      timeRemaining: SABOTAGE_DURATION_SEC,
-      fixStationX: t.x,
-      fixStationZ: t.z,
-      cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-    };
+    this.snapshot.sabotage = createSabotageState(type, SABOTAGE_COOLDOWN_SEC);
+    this.holdingFixMap.clear();
     soundEngine.playSabotage();
   }
 
@@ -637,18 +622,36 @@ export class SoloMatchEngine {
     soundEngine.playDoorSlam();
   }
 
-  public fixSabotage(): boolean {
+  public fixSabotage(holding = true, valveId?: 'valve_cha' | 'valve_rickshaw'): boolean {
     const lp = this.snapshot.players.find((p) => p.id === this.localPlayerId);
-    if (!lp || !lp.alive || !this.snapshot.sabotage.active) return false;
+    if (!lp || !lp.alive || !this.snapshot.sabotage.active) {
+      this.holdingFixMap.delete(this.localPlayerId);
+      return false;
+    }
+    if (!holding) {
+      this.holdingFixMap.delete(this.localPlayerId);
+      return false;
+    }
+    if (this.snapshot.sabotage.active === 'gas_leak') {
+      const range = lp.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
+      const nearValve = valveId
+        ? GAS_LEAK_VALVES.find((v) => v.id === valveId && distance2D(lp.x, lp.z, v.x, v.z) <= range)
+        : findNearestGasValve(lp, this.snapshot.sabotage);
+      if (!nearValve) {
+        this.holdingFixMap.delete(this.localPlayerId);
+        return false;
+      }
+      this.holdingFixMap.set(this.localPlayerId, { valveId: nearValve.id });
+      return true;
+    }
     const range = lp.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
     if (
       distance2D(lp.x, lp.z, this.snapshot.sabotage.fixStationX, this.snapshot.sabotage.fixStationZ) <= range
     ) {
-      this.snapshot.sabotage.active = null;
-      this.snapshot.sabotage.timeRemaining = 0;
-      soundEngine.playTaskComplete();
+      this.holdingFixMap.set(this.localPlayerId, {});
       return true;
     }
+    this.holdingFixMap.delete(this.localPlayerId);
     return false;
   }
 
@@ -656,6 +659,8 @@ export class SoloMatchEngine {
     const lp = this.snapshot.players.find((p) => p.id === this.localPlayerId);
     const body = this.snapshot.bodies.find((b) => b.id === bodyId && !b.reported);
     if (!lp || !lp.alive || !body) return;
+    if (distance2D(lp.x, lp.z, body.x, body.z) > REPORT_RANGE + 1.0) return;
+    if (!hasLineOfSight(lp.x, lp.z, body.x, body.z, WALLS, this.snapshot.doorLocks)) return;
     body.reported = true;
     this.startMeeting(lp, 'body', body.victimName);
   }
@@ -665,7 +670,7 @@ export class SoloMatchEngine {
     if (
       !lp ||
       !lp.alive ||
-      this.snapshot.sabotage.active ||
+      isCriticalSabotage(this.snapshot.sabotage.active) ||
       this.snapshot.emergencyCooldownRemaining > 0 ||
       lp.emergencyMeetingsLeft <= 0
     ) {
@@ -709,17 +714,16 @@ export class SoloMatchEngine {
     this.snapshot.meetingCallerId = caller.id;
     this.snapshot.meetingReason = reason;
     this.snapshot.meetingTimer = this.snapshot.settings.meetingTimeSec;
-    this.snapshot.sabotage.active = null;
-    this.snapshot.sabotage.timeRemaining = 0;
+    this.holdingFixMap.clear();
+    if (isCriticalSabotage(this.snapshot.sabotage.active)) {
+      this.snapshot.sabotage = createEmptySabotageState(SABOTAGE_COOLDOWN_SEC);
+    } else {
+      this.snapshot.sabotage.fixProgress = 0;
+      this.snapshot.sabotage.fixerId = null;
+    }
     this.snapshot.footprints = [];
     this.justEjectedPlayer = null;
-    this.snapshot.doorLocks = {
-      cha_dokan: 0,
-      rickshaw_garage: 0,
-      desco_power: 0,
-      dish_roof: 0,
-      cooldownRemaining: 0,
-    };
+    this.snapshot.doorLocks = makeEmptyDoorLocks();
 
     for (const p of this.snapshot.players) {
       p.inVent = false;
@@ -811,9 +815,6 @@ export class SoloMatchEngine {
       if (this.snapshot.emergencyCooldownRemaining > 0) {
         this.snapshot.emergencyCooldownRemaining = Math.max(0, this.snapshot.emergencyCooldownRemaining - dt);
       }
-      if (this.snapshot.sabotage.cooldownRemaining > 0) {
-        this.snapshot.sabotage.cooldownRemaining = Math.max(0, this.snapshot.sabotage.cooldownRemaining - dt);
-      }
       if (this.snapshot.doorLocks.cooldownRemaining > 0) {
         this.snapshot.doorLocks.cooldownRemaining = Math.max(0, this.snapshot.doorLocks.cooldownRemaining - dt);
       }
@@ -822,11 +823,11 @@ export class SoloMatchEngine {
       this.snapshot.doorLocks.desco_power = Math.max(0, this.snapshot.doorLocks.desco_power - dt);
       this.snapshot.doorLocks.dish_roof = Math.max(0, this.snapshot.doorLocks.dish_roof - dt);
 
-      if (this.snapshot.sabotage.active) {
-        this.snapshot.sabotage.timeRemaining -= dt;
-        if (this.snapshot.sabotage.timeRemaining <= 0) {
-          this.checkWin(true);
-          return;
+      // Clear stale bot entries from holdingFixMap; keep human if still in range
+      for (const hid of Array.from(this.holdingFixMap.keys())) {
+        const hp = this.snapshot.players.find((pl) => pl.id === hid);
+        if (!hp || !hp.alive || hp.isBot) {
+          this.holdingFixMap.delete(hid);
         }
       }
 
@@ -862,7 +863,7 @@ export class SoloMatchEngine {
           }
         }
 
-        const body = findNearestReportableBody(p, this.snapshot.bodies);
+        const body = findNearestReportableBody(p, this.snapshot.bodies, this.snapshot.doorLocks);
         if (body && (p.role === 'parabasi' || (p.specialRole !== 'jharudar' && Math.random() < 0.03))) {
           body.reported = true;
           this.startMeeting(p, 'body', body.victimName);
@@ -890,24 +891,19 @@ export class SoloMatchEngine {
           }
         }
 
-        // Bot Batpar occasionally triggers sabotage or door shutter lock
+        // Bot Batpar triggers sabotage occasionally (throttled; respects 40s lockout & 35s cooldown)
         if (p.role === 'vondo') {
           if (
             !this.snapshot.sabotage.active &&
             this.snapshot.sabotage.cooldownRemaining <= 0 &&
-            Math.random() < 0.005
+            Math.random() < 0.0012
           ) {
-            const sabType: SabotageType = Math.random() < 0.55 ? 'loadshedding' : 'wifi_down';
-            const t = SABOTAGE_TARGETS[sabType];
-            this.snapshot.sabotage = {
-              active: sabType,
-              timeRemaining: SABOTAGE_DURATION_SEC,
-              fixStationX: t.x,
-              fixStationZ: t.z,
-              cooldownRemaining: SABOTAGE_COOLDOWN_SEC,
-            };
+            const roll = Math.random();
+            const sabType: SabotageType =
+              roll < 0.42 ? 'loadshedding' : roll < 0.78 ? 'wifi_down' : 'gas_leak';
+            this.snapshot.sabotage = createSabotageState(sabType, SABOTAGE_COOLDOWN_SEC);
             soundEngine.playSabotage();
-          } else if (this.snapshot.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.004) {
+          } else if (this.snapshot.doorLocks.cooldownRemaining <= 0 && Math.random() < 0.0025) {
             const zones: DoorZoneId[] = ['cha_dokan', 'rickshaw_garage', 'desco_power', 'dish_roof'];
             const zPick = zones[Math.floor(Math.random() * zones.length)];
             this.snapshot.doorLocks[zPick] = DOOR_LOCK_DURATION_SEC;
@@ -916,22 +912,32 @@ export class SoloMatchEngine {
           }
         }
 
-        // Bot Para-basi helps fix active sabotage if nearby
+        // Bot Para-basi holds sabotage fix / valve if nearby
         if (
           this.snapshot.sabotage.active &&
           p.role === 'parabasi' &&
-          p.specialRole !== 'pagol' &&
-          distance2D(
-            p.x,
-            p.z,
-            this.snapshot.sabotage.fixStationX,
-            this.snapshot.sabotage.fixStationZ,
-          ) <= SABOTAGE_FIX_RANGE &&
-          Math.random() < 0.06
+          p.specialRole !== 'pagol'
         ) {
-          this.snapshot.sabotage.active = null;
-          this.snapshot.sabotage.timeRemaining = 0;
-          soundEngine.playTaskComplete();
+          if (this.snapshot.sabotage.active === 'gas_leak') {
+            const nearV = findNearestGasValve(
+              p.x,
+              p.z,
+              this.snapshot.sabotage,
+              p.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE,
+            );
+            if (nearV) {
+              this.holdingFixMap.set(p.id, { valveId: nearV.id });
+            }
+          } else if (
+            distance2D(
+              p.x,
+              p.z,
+              this.snapshot.sabotage.fixStationX,
+              this.snapshot.sabotage.fixStationZ,
+            ) <= SABOTAGE_FIX_RANGE
+          ) {
+            this.holdingFixMap.set(p.id, {});
+          }
         }
 
         if (p.role === 'vondo' && p.killCooldownRemaining <= 0) {
@@ -972,34 +978,50 @@ export class SoloMatchEngine {
           }
         }
 
-        if (brain.pauseTimer > 0) {
+        const holdingSabotageNow = this.holdingFixMap.has(p.id);
+        if (holdingSabotageNow) {
+          p.vx = 0;
+          p.vz = 0;
+        } else if (brain.pauseTimer > 0) {
           brain.pauseTimer -= dt;
           p.vx = 0;
           p.vz = 0;
-          if (brain.pauseTimer <= 0 && p.role === 'parabasi' && p.specialRole !== 'pagol') {
-            const undone = p.tasks.find((t) => !t.completed);
-            if (undone && Math.random() < 0.48) {
-              undone.completed = true;
-              if (this.checkWin()) return;
+          if (brain.pauseTimer <= 0 && canCompleteTasks(p)) {
+            const undone = p.tasks.find((t) => !t.completed && !isTaskLockedBySabotage(t.taskId, this.snapshot.sabotage));
+            if (undone) {
+              const st = TASK_STATIONS.find((s) => s.id === undone.taskId);
+              if (st && distance2D(p.x, p.z, st.x, st.z) <= st.radius + 1.2) {
+                undone.completed = true;
+                if (this.checkWin()) return;
+              }
             }
           }
         } else {
-          const rushSabotage =
-            Boolean(this.snapshot.sabotage.active) &&
-            p.role === 'parabasi' &&
-            p.specialRole !== 'pagol' &&
-            (brain.wpIdx % 2 === 0);
-          const targetPt = rushSabotage
-            ? {
+          const isCrewHelper = p.role === 'parabasi' && p.specialRole !== 'pagol';
+          let targetPt = BOT_WAYPOINTS[brain.wpIdx % BOT_WAYPOINTS.length];
+          if (this.snapshot.sabotage.active && isCrewHelper && brain.wpIdx % 2 === 0) {
+            if (this.snapshot.sabotage.active === 'gas_leak') {
+              const valve = GAS_LEAK_VALVES[brain.wpIdx % GAS_LEAK_VALVES.length];
+              targetPt = { x: valve.x, z: valve.z };
+            } else {
+              targetPt = {
                 x: this.snapshot.sabotage.fixStationX,
                 z: this.snapshot.sabotage.fixStationZ,
-              }
-            : BOT_WAYPOINTS[brain.wpIdx % BOT_WAYPOINTS.length];
+              };
+            }
+          } else if (canCompleteTasks(p)) {
+            const undone = p.tasks.find((t) => !t.completed && !isTaskLockedBySabotage(t.taskId, this.snapshot.sabotage));
+            const st = undone ? TASK_STATIONS.find((s) => s.id === undone.taskId) : null;
+            if (st) {
+              targetPt = { x: st.x, z: st.z };
+            }
+          }
           const dx = targetPt.x - p.x;
           const dz = targetPt.z - p.z;
           const dist = Math.hypot(dx, dz);
           if (dist < 0.9) {
-            brain.pauseTimer = 1.4 + Math.random() * 2.4;
+            const nearStation = TASK_STATIONS.find((s) => distance2D(p.x, p.z, s.x, s.z) <= s.radius + 1.0);
+            brain.pauseTimer = nearStation ? nearStation.holdDurationSec : 1.4 + Math.random() * 2.4;
             brain.wpIdx = Math.floor(Math.random() * BOT_WAYPOINTS.length);
             p.vx = 0;
             p.vz = 0;
@@ -1021,6 +1043,35 @@ export class SoloMatchEngine {
             this.recordFootprint(p, moved);
           }
         }
+      }
+
+      const sabStep = advanceSabotageState(
+        this.snapshot.sabotage,
+        this.snapshot.players,
+        dt,
+        this.holdingFixMap,
+      );
+      if (sabStep.fixed) {
+        this.holdingFixMap.clear();
+        soundEngine.playTaskComplete();
+      } else if (sabStep.expiredCritical) {
+        this.holdingFixMap.clear();
+        this.checkWin(true);
+        return;
+      } else if (sabStep.expiredNonCriticalType) {
+        this.holdingFixMap.clear();
+        this.snapshot.chat.push({
+          id: `sys_sab_${Date.now()}`,
+          senderId: 'system',
+          senderName: 'Moholla Announcement',
+          senderColor: 'holud',
+          text:
+            sabStep.expiredNonCriticalType === 'loadshedding'
+              ? 'Current ashche! DESCO line nijei thik hoye gese!'
+              : 'Wi-Fi ashche! Dish line abar chaloo hoye gese!',
+          timestamp: Date.now(),
+          system: true,
+        });
       }
     } else if (this.snapshot.phase === 'meeting') {
       this.snapshot.meetingTimer = Math.max(0, this.snapshot.meetingTimer - dt);
@@ -1048,7 +1099,7 @@ export class SoloMatchEngine {
           if (brain.voteTimer <= 0) {
             const candidates = this.snapshot.players.filter((pl) => pl.alive && pl.id !== p.id);
             p.votedFor =
-              candidates.length > 0 && Math.random() < 0.65
+              candidates.length > 0 && Math.random() < 0.4
                 ? candidates[Math.floor(Math.random() * candidates.length)].id
                 : 'skip';
             p.hasVoted = true;
@@ -1069,12 +1120,14 @@ export class SoloMatchEngine {
           if (target) {
             target.alive = false;
             this.justEjectedPlayer = target;
-            soundEngine.playEject();
+            if (this.snapshot.ejection?.reason === 'voted') {
+              soundEngine.playEjectBuildup();
+            }
           }
         }
         this.snapshot.bodies = [];
         this.snapshot.phase = 'ejecting';
-        this.phaseTimer = 4.2;
+        this.phaseTimer = this.snapshot.ejection?.reason === 'voted' ? 7.5 : 5.0;
       }
     } else if (this.snapshot.phase === 'ejecting') {
       this.phaseTimer -= dt;
@@ -1088,7 +1141,7 @@ export class SoloMatchEngine {
             p.yaw = sp.yaw;
             p.hasVoted = false;
             p.votedFor = null;
-            if (p.role === 'vondo') p.killCooldownRemaining = 12;
+            if (p.role === 'vondo') p.killCooldownRemaining = this.snapshot.settings.killCooldownSec;
           });
           this.snapshot.emergencyCooldownRemaining = this.snapshot.settings.emergencyCooldownSec;
           this.snapshot.phase = 'playing';

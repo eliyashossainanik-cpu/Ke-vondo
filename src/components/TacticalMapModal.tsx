@@ -7,6 +7,7 @@ import {
 import {
   ADMIN_TABLE_POS,
   EMERGENCY_BELL_POS,
+  GAS_LEAK_VALVES,
   MAP_HALF_SIZE,
   SECURITY_CAMS_POS,
   TASK_STATIONS,
@@ -43,7 +44,8 @@ export function TacticalMapModal({
   if (!localPlayer) return null;
 
   const isVondo = localPlayer.role === 'vondo';
-  const showTasks = canCompleteTasks(localPlayer);
+  const wifiHidden = snapshot.sabotage.active === 'wifi_down' && !isVondo;
+  const showTasks = canCompleteTasks(localPlayer) && !wifiHidden;
   const showVents = isVondo || localPlayer.specialRole === 'mistri';
   const playerColorSpec =
     PLAYER_COLORS.find((c) => c.id === localPlayer.color) ?? PLAYER_COLORS[0];
@@ -248,47 +250,91 @@ export function TacticalMapModal({
                 );
               })}
 
-              {/* Active Sabotage Repair Pin */}
-              {snapshot.sabotage.active && (
-                <g>
-                  <circle
-                    cx={snapshot.sabotage.fixStationX}
-                    cy={snapshot.sabotage.fixStationZ}
-                    r={5.2}
-                    fill="#ef4444"
-                    fillOpacity={0.28}
-                    stroke="#ef4444"
-                    strokeWidth="1"
-                  />
-                  <circle
-                    cx={snapshot.sabotage.fixStationX}
-                    cy={snapshot.sabotage.fixStationZ}
-                    r={2.4}
-                    fill="#ef4444"
-                    stroke="#ffffff"
-                    strokeWidth="0.8"
-                  />
-                  <rect
-                    x={snapshot.sabotage.fixStationX - 11}
-                    y={snapshot.sabotage.fixStationZ - 9.0}
-                    width={22}
-                    height={4.2}
-                    rx="1.2"
-                    fill="#991b1b"
-                    stroke="#fecaca"
-                    strokeWidth="0.5"
-                  />
-                  <text
-                    x={snapshot.sabotage.fixStationX}
-                    y={snapshot.sabotage.fixStationZ - 6.0}
-                    textAnchor="middle"
-                    fill="#ffffff"
-                    fontSize="2.4"
-                    fontWeight="800"
-                  >
-                    FIX SABOTAGE!
-                  </text>
-                </g>
+              {/* Active Sabotage Repair Pin(s) */}
+              {snapshot.sabotage.active === 'gas_leak' ? (
+                GAS_LEAK_VALVES.map((v, idx) => (
+                  <g key={v.id}>
+                    <circle
+                      cx={v.x}
+                      cy={v.z}
+                      r={5.2}
+                      fill="#ef4444"
+                      fillOpacity={0.28}
+                      stroke="#ef4444"
+                      strokeWidth="1"
+                    />
+                    <circle
+                      cx={v.x}
+                      cy={v.z}
+                      r={2.4}
+                      fill="#ef4444"
+                      stroke="#ffffff"
+                      strokeWidth="0.8"
+                    />
+                    <rect
+                      x={v.x - 11}
+                      y={v.z - 9.0}
+                      width={22}
+                      height={4.2}
+                      rx="1.2"
+                      fill="#991b1b"
+                      stroke="#fecaca"
+                      strokeWidth="0.5"
+                    />
+                    <text
+                      x={v.x}
+                      y={v.z - 6.0}
+                      textAnchor="middle"
+                      fill="#ffffff"
+                      fontSize="2.4"
+                      fontWeight="800"
+                    >
+                      GAS VALVE {idx + 1}!
+                    </text>
+                  </g>
+                ))
+              ) : (
+                snapshot.sabotage.active && (
+                  <g>
+                    <circle
+                      cx={snapshot.sabotage.fixStationX}
+                      cy={snapshot.sabotage.fixStationZ}
+                      r={5.2}
+                      fill="#ef4444"
+                      fillOpacity={0.28}
+                      stroke="#ef4444"
+                      strokeWidth="1"
+                    />
+                    <circle
+                      cx={snapshot.sabotage.fixStationX}
+                      cy={snapshot.sabotage.fixStationZ}
+                      r={2.4}
+                      fill="#ef4444"
+                      stroke="#ffffff"
+                      strokeWidth="0.8"
+                    />
+                    <rect
+                      x={snapshot.sabotage.fixStationX - 11}
+                      y={snapshot.sabotage.fixStationZ - 9.0}
+                      width={22}
+                      height={4.2}
+                      rx="1.2"
+                      fill="#991b1b"
+                      stroke="#fecaca"
+                      strokeWidth="0.5"
+                    />
+                    <text
+                      x={snapshot.sabotage.fixStationX}
+                      y={snapshot.sabotage.fixStationZ - 6.0}
+                      textAnchor="middle"
+                      fill="#ffffff"
+                      fontSize="2.4"
+                      fontWeight="800"
+                    >
+                      FIX SABOTAGE!
+                    </text>
+                  </g>
+                )
               )}
 
               {/* Local Player Live Marker */}
@@ -399,6 +445,17 @@ export function TacticalMapModal({
                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-bold text-white"
                 >
                   MB Shesh (Dish Hub)
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(snapshot.sabotage.active) || snapshot.sabotage.cooldownRemaining > 0}
+                  onClick={() => {
+                    onSabotage('gas_leak');
+                    onClose();
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-600 disabled:opacity-40 text-xs font-bold text-white border border-amber-300/40"
+                >
+                  Gas Leak (CRITICAL)
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">

@@ -168,6 +168,9 @@ export type TaskKind =
   | 'pharmacy_mix'
   | 'pandal_dj';
 
+export type TaskCategory = 'common' | 'short' | 'long';
+export type TaskMedium = 'physical' | 'digital';
+
 export interface TaskStation {
   id: string;
   kind: TaskKind;
@@ -177,6 +180,9 @@ export interface TaskStation {
   x: number;
   z: number;
   radius: number;
+  category: TaskCategory;
+  medium: TaskMedium;
+  holdDurationSec: number;
   isVisual?: boolean;
 }
 
@@ -236,6 +242,7 @@ export interface SecurityCamDef {
 export interface PlayerTaskState {
   taskId: string;
   completed: boolean;
+  isFake?: boolean;
 }
 
 export interface PlayerState {
@@ -252,7 +259,7 @@ export interface PlayerState {
   alive: boolean;
   inVent: boolean;
   watchingCams: boolean;
-  visualTaskTimer: number; // >0 shows 3D scan/steam visual task effect
+  visualTaskTimer: number; // >0 shows 3D scan/steam visual task effect within 6m
   abilityCooldown: number;
   shielded: boolean;
   disguiseColor: PlayerColorId | null;
@@ -260,10 +267,18 @@ export interface PlayerState {
   disguiseTimer: number;
   isBot: boolean;
   isHost: boolean;
+  ready: boolean;
+  pingMs?: number;
   tasks: PlayerTaskState[];
   killCooldownRemaining: number;
   emergencyMeetingsLeft: number;
+  scansLeft?: number;
+  shotsLeft?: number;
+  cleansLeft?: number;
   revivesLeft?: number;
+  pranksLeft?: number;
+  jharuTargetBodyId?: string | null;
+  jharuTimer?: number;
   votedFor: string | null; // playerId | 'skip' | null
   hasVoted: boolean;
 }
@@ -289,13 +304,27 @@ export interface FootprintDot {
   expiresAt: number;
 }
 
-export type SabotageType = 'loadshedding' | 'wifi_down';
+export type SabotageType = 'loadshedding' | 'wifi_down' | 'gas_leak';
+export type SabotageSeverity = 'non_critical' | 'critical';
+
+export interface GasValveState {
+  id: 'valve_cha' | 'valve_rickshaw';
+  label: string;
+  zoneName: string;
+  x: number;
+  z: number;
+  holderId: string | null;
+}
 
 export interface SabotageState {
   active: SabotageType | null;
+  kind: SabotageSeverity | null;
   timeRemaining: number;
   fixStationX: number;
   fixStationZ: number;
+  fixProgress: number; // 0..1 progress while holding E at fix station or both gas valves
+  fixerId: string | null;
+  valves: GasValveState[];
   cooldownRemaining: number;
 }
 
@@ -333,6 +362,7 @@ export interface RoomSettings {
   vondoCount: number;
   killCooldownSec: number;
   meetingTimeSec: number;
+  discussionTimeSec: number;
   moveSpeed: number;
   tasksPerPlayer: number;
   emergencyCooldownSec: number;
@@ -341,22 +371,27 @@ export interface RoomSettings {
   anonymousVotes: boolean;
   visualTasks: boolean;
   enableSpecialRoles: boolean;
+  enableNeutralRoles: boolean;
+  autoFillBots: boolean;
 }
+
+export type MatchOutcomeReason =
+  | 'pagol_ejected'
+  | 'tasks_completed'
+  | 'batpars_out'
+  | 'batpars_outnumber'
+  | 'critical_sabotage_timeout';
 
 export interface MatchOutcome {
   winner: 'parabasi' | 'vondo' | 'pagol';
-  reason:
-    | 'tasks_completed'
-    | 'vondos_ejected'
-    | 'vondos_outnumber'
-    | 'sabotage_timeout'
-    | 'jester_ejected';
+  reason: MatchOutcomeReason;
   winnerPlayerId?: string;
   winnerPlayerName?: string;
 }
 
 export interface RoomSnapshot {
   roomCode: string;
+  isSolo?: boolean;
   phase: 'lobby' | 'role_reveal' | 'playing' | 'meeting' | 'vote_results' | 'ejecting' | 'gameover';
   players: PlayerState[];
   bodies: BodyMarker[];
@@ -364,9 +399,15 @@ export interface RoomSnapshot {
   sabotage: SabotageState;
   doorLocks: DoorLockState;
   chat: ChatMessage[];
+  lobbyChat?: ChatMessage[];
+  lobbyCountdownSec?: number | null;
+  hostAbortedReason?: string | null;
+  netaRevealedId?: string | null;
+  prankedLampUntil?: number;
   meetingCallerId: string | null;
   meetingReason: 'body' | 'emergency' | null;
   meetingTimer: number;
+  discussionTimer?: number;
   emergencyCooldownRemaining: number;
   ejection: EjectionInfo | null;
   outcome: MatchOutcome | null;
@@ -386,12 +427,18 @@ export interface PublicRoomSummary {
 
 export type ClientMessage =
   | { type: 'room:create'; name: string; color: PlayerColorId }
-  | { type: 'room:join'; roomCode: string; name: string; color: PlayerColorId }
+  | { type: 'room:join'; roomCode: string; name: string; color: PlayerColorId; reconnectToken?: string }
   | { type: 'room:list' }
   | { type: 'lobby:settings'; settings: Partial<RoomSettings> }
+  | { type: 'lobby:customize'; name?: string; color?: PlayerColorId }
+  | { type: 'lobby:ready'; ready: boolean }
+  | { type: 'lobby:kick'; targetPlayerId: string }
+  | { type: 'lobby:chat'; text: string }
   | { type: 'lobby:add_bot' }
+  | { type: 'lobby:remove_bot'; targetPlayerId?: string }
   | { type: 'lobby:remove_bots' }
   | { type: 'lobby:start' }
+  | { type: 'lobby:cancel_start' }
   | { type: 'player:move'; x: number; z: number; vx: number; vz: number; yaw: number }
   | { type: 'player:task_complete'; taskId: string }
   | { type: 'player:visual_task_start'; taskId: string }
@@ -400,20 +447,22 @@ export type ClientMessage =
   | { type: 'player:use_ability'; targetId?: string }
   | { type: 'player:sabotage'; sabotageType: SabotageType }
   | { type: 'player:lock_doors'; zoneId: DoorZoneId }
-  | { type: 'player:fix_sabotage' }
+  | { type: 'player:fix_sabotage'; holding?: boolean; valveId?: 'valve_cha' | 'valve_rickshaw' }
   | { type: 'player:watch_cams'; watching: boolean }
   | { type: 'player:report_body'; bodyId: string }
   | { type: 'player:emergency_meeting' }
   | { type: 'meeting:chat'; text: string }
   | { type: 'meeting:vote'; targetId: string | 'skip' }
   | { type: 'player:meme_sfx'; memeId: string }
-  | { type: 'room:play_again' };
+  | { type: 'room:play_again' }
+  | { type: 'room:leave' };
 
 export type ServerMessage =
-  | { type: 'room:joined'; playerId: string; snapshot: RoomSnapshot }
+  | { type: 'room:joined'; playerId: string; snapshot: RoomSnapshot; reconnectToken?: string }
   | { type: 'room:list_result'; rooms: PublicRoomSummary[] }
   | { type: 'room:state'; snapshot: RoomSnapshot }
   | { type: 'room:error'; message: string }
+  | { type: 'room:kicked'; message: string }
   | { type: 'clue:result'; title: string; detail: string }
   | { type: 'meme:play'; memeId: string }
   | { type: 'memes:updated'; updatedAt: number }
@@ -424,6 +473,7 @@ export type ServerMessage =
         | 'report'
         | 'meeting'
         | 'sabotage'
+        | 'sabotage_critical'
         | 'task'
         | 'eject'
         | 'vent'
@@ -432,5 +482,11 @@ export type ServerMessage =
         | 'disguise'
         | 'daroga'
         | 'clean'
-        | 'revive';
+        | 'revive'
+        | 'prank'
+        | 'lobby_join'
+        | 'lobby_ready'
+        | 'lobby_tick'
+        | 'lobby_start';
     };
+

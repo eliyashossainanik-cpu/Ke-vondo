@@ -16,13 +16,16 @@ function stripTrailingSlashes(url: string): string {
 export function resolveServerConfig(
   configuredUrl: string | undefined,
   locationLike?: { protocol: string; host: string },
+  roomCode?: string,
 ): ResolvedServerConfig {
+  const cleanRoom = roomCode?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') ?? '';
+  const wsQuery = cleanRoom ? `?room=${encodeURIComponent(cleanRoom)}` : '';
   const trimmed = configuredUrl?.trim() ?? '';
   if (trimmed) {
     const clean = stripTrailingSlashes(trimmed);
     const hasScheme = /^https?:\/\//i.test(clean);
     const normalizedHttp = hasScheme ? clean : `https://${clean}`;
-    const wsUrl = `${normalizedHttp.replace(/^http/i, 'ws')}/ws`;
+    const wsUrl = `${normalizedHttp.replace(/^http/i, 'ws')}/ws${wsQuery}`;
     return {
       apiBaseUrl: normalizedHttp,
       wsUrl,
@@ -33,15 +36,15 @@ export function resolveServerConfig(
   const host = locationLike?.host || 'localhost:3000';
   return {
     apiBaseUrl: '',
-    wsUrl: `${proto}//${host}/ws`,
+    wsUrl: `${proto}//${host}/ws${wsQuery}`,
   };
 }
 
-export function getServerConfig(): ResolvedServerConfig {
+export function getServerConfig(roomCode?: string): ResolvedServerConfig {
   const envUrl =
     (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_SERVER_URL;
   const loc = typeof window !== 'undefined' ? window.location : undefined;
-  return resolveServerConfig(envUrl, loc);
+  return resolveServerConfig(envUrl, loc, roomCode);
 }
 
 export function getApiUrl(path: string): string {
@@ -50,6 +53,6 @@ export function getApiUrl(path: string): string {
   return `${apiBaseUrl}${normalizedPath}`;
 }
 
-export function getWebSocketUrl(): string {
-  return getServerConfig().wsUrl;
+export function getWebSocketUrl(roomCode?: string): string {
+  return getServerConfig(roomCode).wsUrl;
 }

@@ -22,8 +22,11 @@ import {
   SABOTAGE_FIX_RANGE,
   canCompleteTasks,
   canUseVent,
+  findNearestGasValve,
   findNearestKillTarget,
   findNearestReportableBody,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
   sanitizeSoloConfig,
 } from './shared/gameRules';
 import { WorldScene } from './three/WorldScene';
@@ -94,6 +97,7 @@ export default function App() {
   const resetCameraRef = useRef<(() => void) | null>(null);
   const jumpTriggerRef = useRef<(() => void) | null>(null);
   const joystickInputRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const holdingFixKeyRef = useRef(false);
   const clueTimerRef = useRef<number | null>(null);
 
   const showClueNotice = useCallback((title: string, detail: string) => {
@@ -279,18 +283,21 @@ export default function App() {
 
   const handleCompleteTask = useCallback(
     (taskId: string) => {
+      const lp = activeSnapshot?.players.find((p) => p.id === activePlayerId) ?? null;
       if (mode === 'solo' && soloEngineRef.current) {
-        if (soloEngineRef.current.completeLocalTask(taskId)) {
+        if (soloEngineRef.current.completeLocalTask(taskId) && lp && canCompleteTasks(lp)) {
           incrementCareerTasksCompleted(1);
         }
         setSoloSnapshot(soloEngineRef.current.getSnapshot());
       } else if (mode === 'multi') {
         mp.send({ type: 'player:task_complete', taskId });
-        incrementCareerTasksCompleted(1);
+        if (lp && canCompleteTasks(lp)) {
+          incrementCareerTasksCompleted(1);
+        }
       }
       setActiveTaskId(null);
     },
-    [mode, mp],
+    [mode, mp, activeSnapshot, activePlayerId],
   );
 
   const handleReportBody = useCallback(
@@ -361,14 +368,17 @@ export default function App() {
     [mode, mp],
   );
 
-  const handleFixSabotage = useCallback(() => {
-    if (mode === 'solo' && soloEngineRef.current) {
-      soloEngineRef.current.fixSabotage();
-      setSoloSnapshot(soloEngineRef.current.getSnapshot());
-    } else if (mode === 'multi') {
-      mp.send({ type: 'player:fix_sabotage' });
-    }
-  }, [mode, mp]);
+  const handleFixSabotageHold = useCallback(
+    (holding: boolean, valveId?: 'valve_cha' | 'valve_rickshaw') => {
+      if (mode === 'solo' && soloEngineRef.current) {
+        soloEngineRef.current.fixSabotage(holding, valveId);
+        setSoloSnapshot(soloEngineRef.current.getSnapshot());
+      } else if (mode === 'multi') {
+        mp.send({ type: 'player:fix_sabotage', holding, valveId });
+      }
+    },
+    [mode, mp],
+  );
 
   const handleVentToggle = useCallback(
     (destVentId?: string) => {
@@ -547,23 +557,35 @@ export default function App() {
 
       const fixRange = lp.specialRole === 'mistri' ? MISTRI_FIX_RANGE : SABOTAGE_FIX_RANGE;
       if (e.code === 'KeyE') {
-        if (
-          activeSnapshot.sabotage.active &&
-          lp.alive &&
-          distance2D(lp.x, lp.z, activeSnapshot.sabotage.fixStationX, activeSnapshot.sabotage.fixStationZ) <=
-            fixRange
-        ) {
-          handleFixSabotage();
-          return;
+        if (activeSnapshot.sabotage.active && lp.alive) {
+          const nearValve =
+            activeSnapshot.sabotage.active === 'gas_leak'
+              ? findNearestGasValve(lp.x, lp.z, activeSnapshot.sabotage, fixRange)
+              : null;
+          const nearStation =
+            activeSnapshot.sabotage.active !== 'gas_leak' &&
+            distance2D(lp.x, lp.z, activeSnapshot.sabotage.fixStationX, activeSnapshot.sabotage.fixStationZ) <=
+              fixRange;
+          if (nearValve || nearStation) {
+            if (!e.repeat && !holdingFixKeyRef.current) {
+              holdingFixKeyRef.current = true;
+              handleFixSabotageHold(true, nearValve?.id);
+            }
+            return;
+          }
         }
-        // Alive or Ghost Para-basi (non-Pagol) can open tasks at TASK_STATIONS
-        if (canCompleteTasks(lp)) {
+        // Alive or Ghost Para-basi (non-Pagol) open real tasks; Batpar can open fake tasks for cover
+        if (canCompleteTasks(lp) || lp.role === 'vondo') {
           const st = TASK_STATIONS.find((s) => {
             const undone = lp.tasks.some((t) => t.taskId === s.id && !t.completed);
             return undone && distance2D(lp.x, lp.z, s.x, s.z) <= s.radius;
           });
           if (st) {
-            setActiveTaskId(st.id);
+            if (isTaskLockedBySabotage(st.id, activeSnapshot.sabotage) && lp.role !== 'vondo') {
+              showClueNotice('Wi-Fi Nai!', 'Dish Hub e giye Wi-Fi thik koro — digital task locked!');
+            } else {
+              setActiveTaskId(st.id);
+            }
             return;
           }
         }
@@ -582,12 +604,12 @@ export default function App() {
           }
         }
       } else if (e.code === 'KeyR') {
-        const body = findNearestReportableBody(lp, activeSnapshot.bodies);
+        const body = findNearestReportableBody(lp, activeSnapshot.bodies, activeSnapshot.doorLocks);
         if (body) handleReportBody(body.id);
       } else if (e.code === 'KeyF') {
         if (
           lp.alive &&
-          !activeSnapshot.sabotage.active &&
+          !isCriticalSabotage(activeSnapshot.sabotage.active) &&
           activeSnapshot.emergencyCooldownRemaining <= 0 &&
           lp.emergencyMeetingsLeft > 0 &&
           distance2D(lp.x, lp.z, EMERGENCY_BELL_POS.x, EMERGENCY_BELL_POS.z) <=
@@ -614,8 +636,28 @@ export default function App() {
       }
     };
 
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'KeyE' && holdingFixKeyRef.current) {
+        holdingFixKeyRef.current = false;
+        handleFixSabotageHold(false);
+      }
+    };
+
+    const onBlur = () => {
+      if (holdingFixKeyRef.current) {
+        holdingFixKeyRef.current = false;
+        handleFixSabotageHold(false);
+      }
+    };
+
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [
     derivedPhase,
     showMemePack,
@@ -629,7 +671,7 @@ export default function App() {
     handleToggleMute,
     handleTogglePointerLook,
     handleResetCamera,
-    handleFixSabotage,
+    handleFixSabotageHold,
     handleOpenStation,
     handleCloseStation,
     handleReportBody,
@@ -639,6 +681,7 @@ export default function App() {
     handleVentToggle,
     handleSabotage,
     handlePlayMeme,
+    showClueNotice,
   ]);
 
   const activeTaskStation = activeTaskId ? TASK_STATIONS.find((s) => s.id === activeTaskId) ?? null : null;
@@ -767,14 +810,21 @@ export default function App() {
             onPause={() => setPaused(true)}
             onOpenTacticalMap={() => setShowTacticalMap(true)}
             onOpenGuide={() => setShowGuide(true)}
-            onOpenTask={(id) => setActiveTaskId(id)}
+            onOpenTask={(id) => {
+              const lp = activeSnapshot.players.find((p) => p.id === activePlayerId);
+              if (lp && isTaskLockedBySabotage(id, activeSnapshot.sabotage) && lp.role !== 'vondo') {
+                showClueNotice('Wi-Fi Nai!', 'Dish Hub e giye Wi-Fi thik koro — digital task locked!');
+                return;
+              }
+              setActiveTaskId(id);
+            }}
             onOpenStation={handleOpenStation}
             onReportBody={handleReportBody}
             onEmergencyMeeting={handleEmergencyMeeting}
             onKill={handleKill}
             onSabotage={handleSabotage}
             onLockDoors={handleLockDoors}
-            onFixSabotage={handleFixSabotage}
+            onFixSabotageHold={handleFixSabotageHold}
             onVentToggle={handleVentToggle}
             onUseAbility={handleUseAbility}
             onPlayMeme={handlePlayMeme}
@@ -848,7 +898,17 @@ export default function App() {
 
       {/* Ejection Transition Banner */}
       {derivedPhase === 'ejecting' && activeSnapshot?.ejection && (
-        <EjectionModal ejection={activeSnapshot.ejection} />
+        <EjectionModal
+          ejection={activeSnapshot.ejection}
+          onContinue={
+            mode === 'solo'
+              ? () => {
+                  soloEngineRef.current?.dismissEjection();
+                  if (soloEngineRef.current) setSoloSnapshot(soloEngineRef.current.getSnapshot());
+                }
+              : undefined
+          }
+        />
       )}
 
       {/* Pause Modal */}

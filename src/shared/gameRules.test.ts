@@ -1,17 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DAROGA_ARREST_RANGE,
+  advanceSabotageState,
+  assignMatchTasks,
   assignRoles,
   assignSpecialRoles,
   canCompleteTasks,
   canExecuteKill,
   canUseVent,
   computeTaskProgress,
+  createEmptySabotageState,
   createPlayerTasks,
+  createSabotageState,
   evaluateMatchOutcome,
   findNearestCleanableBody,
   findNearestDarogaTarget,
   findNearestInspectableBody,
+  findNearestReportableBody,
   findNearestRevivableBody,
   findNearestShieldTarget,
   getColorShadeHint,
@@ -19,6 +25,9 @@ import {
   getDirectionCompass,
   getPlayerVoteWeight,
   inspectBodyClue,
+  isCriticalSabotage,
+  isTaskLockedBySabotage,
+  makeDefaultPlayerState,
   resolveDarogaShot,
   resolveVentHopTarget,
   sanitizeSoloConfig,
@@ -36,35 +45,12 @@ import {
 import type { BodyMarker, DoorLockState, PlayerState } from './types';
 
 function makePlayer(overrides: Partial<PlayerState>): PlayerState {
-  return {
+  return makeDefaultPlayerState({
     id: 'p1',
     name: 'Player',
     color: 'lal',
-    x: 0,
-    z: 3.8,
-    vx: 0,
-    vz: 0,
-    yaw: 0,
-    role: 'parabasi',
-    specialRole: 'none',
-    alive: true,
-    inVent: false,
-    watchingCams: false,
-    visualTaskTimer: 0,
-    abilityCooldown: 0,
-    shielded: false,
-    disguiseColor: null,
-    disguiseName: null,
-    disguiseTimer: 0,
-    isBot: false,
-    isHost: false,
-    tasks: [],
-    killCooldownRemaining: 0,
-    emergencyMeetingsLeft: 2,
-    votedFor: null,
-    hasVoted: false,
     ...overrides,
-  };
+  });
 }
 
 test('all spawn ring positions are clear of walls', () => {
@@ -128,22 +114,26 @@ test('assignRoles assigns exact requested Vondo count within player bounds', () 
   assert.equal(vondos.length, 2);
 });
 
-test('assignSpecialRoles assigns Bohurupi, Goyenda, Kobiraj, Mistri, and Pagol across 7 players', () => {
-  const roster = Array.from({ length: 7 }, (_, i) =>
+test('assignSpecialRoles respects balanced distribution, 0 neutrals at 5P, and >=2 plain Parabasi', () => {
+  const roster5 = Array.from({ length: 5 }, (_, i) =>
+    makePlayer({ id: `p5_${i}`, role: i === 0 ? 'vondo' : 'parabasi' }),
+  );
+  const assigned5 = assignSpecialRoles(roster5, true, undefined, undefined, () => 0.2, true);
+  assert.equal(assigned5.filter((p) => p.specialRole === 'pagol').length, 0);
+  assert.equal(assigned5.filter((p) => p.role === 'parabasi' && p.specialRole === 'none').length, 3);
+
+  const roster7 = Array.from({ length: 7 }, (_, i) =>
     makePlayer({
       id: `p${i}`,
       role: i === 0 ? 'vondo' : 'parabasi',
     }),
   );
-  const withSpecials = assignSpecialRoles(roster, true, undefined, undefined, () => 0.37);
-  assert.equal(withSpecials.find((p) => p.role === 'vondo')?.specialRole, 'bohurupi');
-  const crewSpecials = new Set(withSpecials.filter((p) => p.role === 'parabasi').map((p) => p.specialRole));
-  assert.ok(crewSpecials.has('goyenda'));
-  assert.ok(crewSpecials.has('kobiraj'));
-  assert.ok(crewSpecials.has('mistri'));
-  assert.ok(crewSpecials.has('pagol'));
+  const withSpecials = assignSpecialRoles(roster7, true, undefined, undefined, () => 0.2, true);
+  const plainCrew7 = withSpecials.filter((p) => p.role === 'parabasi' && p.specialRole === 'none').length;
+  assert.ok(plainCrew7 >= 2, `Expected >=2 plain Parabasi in 7P, got ${plainCrew7}`);
+  assert.ok(withSpecials.filter((p) => p.role === 'vondo' && p.specialRole !== 'none').length <= 1);
 
-  const disabled = assignSpecialRoles(roster, false);
+  const disabled = assignSpecialRoles(roster7, false);
   assert.ok(disabled.every((p) => p.specialRole === 'none'));
 });
 
@@ -235,11 +225,11 @@ test('tallyVotes handles majority ejection, ties, skips, and confirmEjects flag'
   assert.equal(skipped.ejectedId, null);
 });
 
-test('evaluateMatchOutcome detects Pagol ejection victory and all standard win/loss states', () => {
+test('evaluateMatchOutcome detects Pagol ejection victory, neutrals in parity, and exact priority', () => {
   const pagol = makePlayer({ id: 'j1', name: 'Pagol Bhai', role: 'parabasi', specialRole: 'pagol', alive: false });
   assert.deepEqual(evaluateMatchOutcome([pagol], 0.2, false, pagol), {
     winner: 'pagol',
-    reason: 'jester_ejected',
+    reason: 'pagol_ejected',
     winnerPlayerId: 'j1',
     winnerPlayerName: 'Pagol Bhai',
   });
@@ -251,7 +241,7 @@ test('evaluateMatchOutcome detects Pagol ejection victory and all standard win/l
   ];
   assert.deepEqual(evaluateMatchOutcome(allVondosDead, 0.2), {
     winner: 'parabasi',
-    reason: 'vondos_ejected',
+    reason: 'batpars_out',
   });
 
   const tasksDone = [
@@ -264,18 +254,26 @@ test('evaluateMatchOutcome detects Pagol ejection victory and all standard win/l
     reason: 'tasks_completed',
   });
 
+  // Parity MUST count alive neutrals (1 Batpar vs 1 Parabasi + 1 Pagol = 1 vs 2 -> match continues!)
+  const parityWithPagol = [
+    makePlayer({ id: 'p1', role: 'vondo', alive: true }),
+    makePlayer({ id: 'p2', role: 'parabasi', alive: true }),
+    makePlayer({ id: 'p3', role: 'parabasi', specialRole: 'pagol', alive: true }),
+  ];
+  assert.equal(evaluateMatchOutcome(parityWithPagol, 0.5), null);
+
   const vondoEqual = [
     makePlayer({ id: 'p1', role: 'vondo', alive: true }),
     makePlayer({ id: 'p2', role: 'parabasi', alive: true }),
   ];
   assert.deepEqual(evaluateMatchOutcome(vondoEqual, 0.5), {
     winner: 'vondo',
-    reason: 'vondos_outnumber',
+    reason: 'batpars_outnumber',
   });
 
   assert.deepEqual(evaluateMatchOutcome(tasksDone, 0.5, true), {
     winner: 'vondo',
-    reason: 'sabotage_timeout',
+    reason: 'critical_sabotage_timeout',
   });
 });
 
@@ -390,13 +388,93 @@ test('Jharudar body clean & Daktar Saline revive body range and limits', () => {
   assert.equal(findNearestRevivableBody(daktarReady, [body])?.id, 'b_clean');
   assert.equal(findNearestRevivableBody(daktarEmpty, [body]), null);
 
-  // 8-player 2-vondo assigns both bohurupi & jharudar and 6 crew/neutral specials
+  // 8-player 2-vondo leaves >=2 plain Parabasi & assigns specials from pool
   const roster8 = Array.from({ length: 8 }, (_, i) =>
     makePlayer({ id: `r${i}`, role: i < 2 ? 'vondo' : 'parabasi' }),
   );
-  const assigned8 = assignSpecialRoles(roster8, true, undefined, undefined, () => 0.25);
-  const vSpecials = new Set(assigned8.filter((p) => p.role === 'vondo').map((p) => p.specialRole));
-  assert.ok(vSpecials.has('bohurupi') && vSpecials.has('jharudar'));
-  const cSpecials = new Set(assigned8.filter((p) => p.role === 'parabasi').map((p) => p.specialRole));
-  assert.ok(cSpecials.has('daroga') && cSpecials.has('neta'));
+  const assigned8 = assignSpecialRoles(roster8, true, undefined, undefined, () => 0.25, true);
+  assert.ok(assigned8.filter((p) => p.role === 'parabasi' && p.specialRole === 'none').length >= 2);
+});
+
+test('Phase 1 sabotage rules: non-critical auto-expires harmlessly, gas_leak requires 2 holders or triggers critical expiry', () => {
+  assert.equal(isCriticalSabotage('loadshedding'), false);
+  assert.equal(isCriticalSabotage('wifi_down'), false);
+  assert.equal(isCriticalSabotage('gas_leak'), true);
+
+  // Loadshedding 90s auto-expiry never sets expiredCritical
+  const load = createSabotageState('loadshedding');
+  const p1 = makePlayer({ id: 'p1', x: -35, z: 33 });
+  const loadRes = advanceSabotageState(load, [p1], 91, new Map());
+  assert.equal(loadRes.expiredCritical, false);
+  assert.equal(loadRes.expiredNonCriticalType, 'loadshedding');
+  assert.equal(load.active, null);
+
+  // Wi-Fi down locks digital tasks only
+  const wifi = createSabotageState('wifi_down');
+  assert.equal(isTaskLockedBySabotage('task_dish', wifi), true);
+  assert.equal(isTaskLockedBySabotage('task_cha', wifi), false);
+
+  // Gas leak requires 2 DIFFERENT players at the 2 valves held simultaneously for 2s
+  const gas = createSabotageState('gas_leak');
+  const c1 = makePlayer({ id: 'c1', x: gas.valves[0].x, z: gas.valves[0].z });
+  const c2 = makePlayer({ id: 'c2', x: gas.valves[1].x, z: gas.valves[1].z });
+  const singleHold = new Map<string, { valveId?: 'valve_cha' | 'valve_rickshaw' }>([
+    ['c1', { valveId: 'valve_cha' }],
+  ]);
+  advanceSabotageState(gas, [c1, c2], 3.0, singleHold);
+  assert.equal(gas.active, 'gas_leak');
+
+  const dualHold = new Map<string, { valveId?: 'valve_cha' | 'valve_rickshaw' }>([
+    ['c1', { valveId: 'valve_cha' }],
+    ['c2', { valveId: 'valve_rickshaw' }],
+  ]);
+  const fixedRes = advanceSabotageState(gas, [c1, c2], 2.1, dualHold);
+  assert.equal(fixedRes.fixed, true);
+  assert.equal(gas.active, null);
+
+  // Gas leak 45s timeout ends match
+  const gasTimeout = createSabotageState('gas_leak');
+  const expRes = advanceSabotageState(gasTimeout, [c1, c2], 46, new Map());
+  assert.equal(expRes.expiredCritical, true);
+});
+
+test('Phase 1 tasks & LOS: common tasks shared across crew, Batpar gets fake tasks, DAROGA range is 6m, walls block body reports', () => {
+  assert.equal(DAROGA_ARREST_RANGE, 6.0);
+  const roster = [
+    makePlayer({ id: 'v1', role: 'vondo' }),
+    makePlayer({ id: 'c1', role: 'parabasi' }),
+    makePlayer({ id: 'c2', role: 'parabasi' }),
+    makePlayer({ id: 'pag', role: 'parabasi', specialRole: 'pagol' }),
+  ];
+  assignMatchTasks(roster, 5, () => 0.4);
+  assert.equal(roster[0].tasks.length, 5);
+  assert.equal(roster[0].tasks.every((t) => t.isFake === true), true);
+  assert.equal(roster[3].tasks.length, 0);
+  assert.equal(roster[1].tasks.length, 5);
+  assert.equal(roster[2].tasks.length, 5);
+  // Both crew share the first 2 common tasks
+  assert.deepEqual(
+    roster[1].tasks.slice(0, 2).map((t) => t.taskId),
+    roster[2].tasks.slice(0, 2).map((t) => t.taskId),
+  );
+
+  // Solid wall cha_s_stub (-45..-36.5, z -23.4..-22.5) blocks body report LOS from z -21.5 to z -24.5
+  const finder = makePlayer({ id: 'f1', x: -40.0, z: -21.5 });
+  const hiddenBody: BodyMarker = {
+    id: 'b_wall',
+    victimId: 'vx',
+    victimName: 'Hidden',
+    color: 'neel',
+    x: -40.0,
+    z: -24.5,
+    reported: false,
+    killedAt: 1000,
+    killerColorHint: 'Light',
+    killerZoneHint: 'Cha Dokan',
+  };
+  assert.equal(findNearestReportableBody(finder, [hiddenBody]), null);
+
+  // Clear LOS inside same doorway/yard allows report
+  const clearBody: BodyMarker = { ...hiddenBody, id: 'b_clear', x: -39.0, z: -21.5 };
+  assert.equal(findNearestReportableBody(finder, [clearBody])?.id, 'b_clear');
 });

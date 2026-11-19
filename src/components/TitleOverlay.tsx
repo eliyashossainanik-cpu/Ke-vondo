@@ -458,6 +458,7 @@ export function TitleOverlay({
                       className="px-2 py-1 rounded bg-slate-950 border border-slate-700 text-white"
                     >
                       <option value={4}>4 Tasks</option>
+                      <option value={5}>5 Tasks</option>
                       <option value={6}>6 Tasks</option>
                       <option value={8}>8 Tasks</option>
                     </select>

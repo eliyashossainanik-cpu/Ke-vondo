@@ -61,8 +61,8 @@ test('P2P host room allows guest join by room code, bot fill, start match, and m
   engine.handleMessage('host_peer', { type: 'lobby:start' });
   assert.equal(engine.getSnapshot().phase, 'role_reveal');
 
-  // Advance past role_reveal (2.8s)
-  for (let i = 0; i < 60; i++) {
+  // Advance past role_reveal (8.0s)
+  for (let i = 0; i < 170; i++) {
     engine.step(0.05);
   }
   assert.equal(engine.getSnapshot().phase, 'playing');
@@ -113,3 +113,67 @@ test('P2P multiplayer auto-assigns unique names, distinct colors, and random rol
   assert.equal(started.players.filter((p) => p.role === 'vondo').length, 1);
 });
 
+test('P2PHostRoomEngine promotes remaining human player when host leaves', () => {
+  const engine = new P2PHostRoomEngine('H0ST1', {
+    sendToClient: () => {},
+    broadcast: () => {},
+  });
+
+  engine.addClient('h1', 'Host Dada', 'lal', true);
+  engine.handleMessage('h1', { type: 'lobby:add_bot' });
+  engine.handleMessage('g1', { type: 'room:join', roomCode: 'H0ST1', name: 'Guest Mia', color: 'neel' });
+
+  engine.removeClient('h1');
+  assert.equal(engine.hasHumanClients(), true);
+  const remaining = engine.getSnapshot().players;
+  const newHost = remaining.find((p) => p.name === 'Guest Mia');
+  const bot = remaining.find((p) => p.isBot);
+  assert.equal(newHost?.isHost, true);
+  assert.equal(bot?.isHost, false);
+});
+
+test('P2PHostRoomEngine extends voted Pukur ejection phase to 7.5s and marks victim dead as ghost', () => {
+  const engine = new P2PHostRoomEngine('EJCT1', {
+    sendToClient: () => {},
+    broadcast: () => {},
+  });
+
+  engine.addClient('h1', 'Host Mia', 'lal', true);
+  engine.addClient('g1', 'Neel Mia', 'neel', false);
+  engine.addClient('g2', 'Shobuj Mia', 'shobuj', false);
+  engine.addClient('g3', 'Holud Mia', 'holud', false);
+  engine.addClient('g4', 'Beguni Apa', 'beguni', false);
+
+  engine.handleMessage('h1', { type: 'lobby:start' });
+  for (let i = 0; i < 170; i++) engine.step(0.05);
+  assert.equal(engine.getSnapshot().phase, 'playing');
+
+  // Advance past initial emergencyCooldownRemaining (15s) before ringing Adda Bell
+  for (let i = 0; i < 320; i++) engine.step(0.05);
+  engine.handleMessage('h1', { type: 'player:move', x: 0, z: 0, vx: 0, vz: 0, yaw: 0 });
+  engine.handleMessage('h1', { type: 'player:emergency_meeting' });
+  assert.equal(engine.getSnapshot().phase, 'meeting');
+
+  const players = engine.getSnapshot().players;
+  const target = players.find((p) => p.id !== 'pl_host' && p.role === 'parabasi') ?? players[1];
+  for (const cid of ['h1', 'g1', 'g2', 'g3', 'g4']) {
+    engine.handleMessage(cid, { type: 'meeting:vote', targetId: target.id });
+  }
+  engine.step(0.05);
+  assert.equal(engine.getSnapshot().phase, 'vote_results');
+
+  // Advance past 2.6s vote_results into ejecting
+  for (let i = 0; i < 56; i++) engine.step(0.05);
+  const ejectSnap = engine.getSnapshot();
+  assert.equal(ejectSnap.phase, 'ejecting');
+  assert.equal(ejectSnap.ejection?.reason, 'voted');
+  assert.equal(ejectSnap.players.find((p) => p.id === target.id)?.alive, false);
+
+  // At 4.5s into ejecting (still watching post-splash animation), phase must still be 'ejecting'
+  for (let i = 0; i < 90; i++) engine.step(0.05);
+  assert.equal(engine.getSnapshot().phase, 'ejecting');
+
+  // Advancing past 7.5s exits ejecting (back to playing or gameover)
+  for (let i = 0; i < 70; i++) engine.step(0.05);
+  assert.notEqual(engine.getSnapshot().phase, 'ejecting');
+});

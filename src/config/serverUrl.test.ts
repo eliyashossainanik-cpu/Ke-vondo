@@ -30,3 +30,11 @@ test('supports bare hostname and http local dev backend URLs', () => {
   assert.equal(local.apiBaseUrl, 'http://192.168.1.25:3000');
   assert.equal(local.wsUrl, 'ws://192.168.1.25:3000/ws');
 });
+
+test('appends sanitized ?room= query parameter for Cloudflare Durable Object routing', () => {
+  const sameOrigin = resolveServerConfig('', { protocol: 'https:', host: 'ke-vondo.eliyashossainanik2007.workers.dev' }, ' ab-12c ');
+  assert.equal(sameOrigin.wsUrl, 'wss://ke-vondo.eliyashossainanik2007.workers.dev/ws?room=AB12C');
+
+  const external = resolveServerConfig('https://ke-vondo.workers.dev/', undefined, 'k9x2p');
+  assert.equal(external.wsUrl, 'wss://ke-vondo.workers.dev/ws?room=K9X2P');
+});
